@@ -5,6 +5,7 @@ from pydantic import SecretStr
 from app.core.config import Settings, get_settings
 from app.main import create_app
 from app.models import Base
+from tests.fakes import FakeStorage
 
 
 @pytest.fixture(autouse=True)
@@ -33,8 +34,14 @@ def settings() -> Settings:
 
 
 @pytest.fixture
-def app(settings: Settings):
+def storage() -> FakeStorage:
+    return FakeStorage()
+
+
+@pytest.fixture
+def app(settings: Settings, storage: FakeStorage):
     app = create_app(settings)
+    app.state.storage = storage  # 테스트는 실제 S3/MinIO를 호출하지 않는다
     Base.metadata.create_all(app.state.engine)
     yield app
     app.state.engine.dispose()
@@ -75,3 +82,10 @@ def signup(client):
 @pytest.fixture
 def auth_headers(signup) -> dict[str, str]:
     return {"Authorization": f"Bearer {signup()['accessToken']}"}
+
+
+@pytest.fixture
+def other_headers(signup) -> dict[str, str]:
+    """FORBIDDEN 테스트용 두 번째 사용자."""
+    token = signup(email="other@ycu.ac.kr", nickname="다른사람")["accessToken"]
+    return {"Authorization": f"Bearer {token}"}

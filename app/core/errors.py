@@ -77,6 +77,8 @@ def _reason_ko(err: dict[str, Any]) -> str:
             return "허용 범위를 벗어난 값이에요."
         case "value_error" if "email" in str(err.get("msg", "")).lower():
             return "올바른 이메일 형식이 아니에요."
+        case "null_not_allowed":
+            return "값을 비울 수 없어요."
         case "string_type":
             return "문자열로 입력해 주세요."
         case "bool_type" | "bool_parsing":

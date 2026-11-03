@@ -32,6 +32,9 @@ class Settings(BaseSettings):
 
     # 파일 저장
     s3_endpoint_url: str | None = None
+    # presigned URL 서명용 주소. 브라우저가 접속할 수 있어야 한다(compose: http://localhost:9000).
+    # 비우면 s3_endpoint_url을 쓴다(AWS S3는 둘 다 비움).
+    s3_public_endpoint_url: str | None = None
     s3_bucket: str = "presento"
     s3_access_key: SecretStr = SecretStr("")
     s3_secret_key: SecretStr = SecretStr("")
@@ -43,7 +46,19 @@ class Settings(BaseSettings):
     # 비용 보호
     max_video_seconds: int = 600
     max_video_bytes: int = 524_288_000
+    max_slides_bytes: int = 20 * 1024 * 1024
     daily_analysis_limit: int = 20
+
+    # presigned URL 만료(초): 명세 P6 600, N1 900, N5 3600
+    slides_upload_url_expires_sec: int = 600
+    video_upload_url_expires_sec: int = 900
+    video_play_url_expires_sec: int = 3600
+
+    @field_validator("s3_endpoint_url", "s3_public_endpoint_url", mode="before")
+    @classmethod
+    def _blank_url_is_none(cls, v: object) -> object:
+        # .env의 "S3_PUBLIC_ENDPOINT_URL=" 같은 빈 값은 "설정 안 함"으로 본다.
+        return None if isinstance(v, str) and not v.strip() else v
 
     @field_validator("openai_api_key")
     @classmethod

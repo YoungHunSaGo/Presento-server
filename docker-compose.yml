@@ -5,6 +5,8 @@ x-app-env: &app-env
   DATABASE_URL: postgresql+psycopg://presento:presento@postgres:5432/presento
   REDIS_URL: redis://redis:6379/0
   S3_ENDPOINT_URL: http://minio:9000
+  # 브라우저가 presigned URL로 직접 PUT/GET하는 주소
+  S3_PUBLIC_ENDPOINT_URL: http://localhost:9000
 
 services:
   api:
@@ -78,6 +80,8 @@ services:
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+      # 브라우저가 presigned URL로 직접 업로드할 수 있게 프론트 주소를 허용
+      MINIO_API_CORS_ALLOW_ORIGIN: ${CORS_ORIGINS:-http://localhost:5173}
     ports:
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:9001:9001"

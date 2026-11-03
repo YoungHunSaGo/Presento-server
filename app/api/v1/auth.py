@@ -66,10 +66,14 @@ def signup(
     db.add(user)
     try:
         db.commit()
-    except IntegrityError:
-        # 동시에 같은 이메일로 가입한 경우
+    except IntegrityError as e:
         db.rollback()
-        raise _email_exists() from None
+        # 동시에 같은 이메일로 가입한 경우만 409로 바꾸고 나머지 제약 위반은 그대로 올린다.
+        # PostgreSQL은 제약 이름, SQLite는 "users.email"을 메시지에 담는다.
+        msg = str(e.orig)
+        if "uq_users_email" in msg or "users.email" in msg:
+            raise _email_exists() from None
+        raise
     db.refresh(user)
     return _auth_response(user, settings)
 

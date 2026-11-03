@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError
 from app.core.security import decode_access_token
-from app.models import User
+from app.models import Presentation, User
+from app.services.storage import Storage
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -40,3 +41,21 @@ def get_current_user(
     if user is None:
         raise unauthorized()
     return user
+
+
+def get_storage(request: Request) -> Storage:
+    return request.app.state.storage
+
+
+def get_owned_presentation(
+    presentation_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Presentation:
+    """없으면 404 NOT_FOUND, 다른 사용자의 발표면 403 FORBIDDEN."""
+    presentation = db.get(Presentation, presentation_id)
+    if presentation is None:
+        raise AppError("NOT_FOUND", "발표를 찾을 수 없어요.", 404)
+    if presentation.user_id != user.id:
+        raise AppError("FORBIDDEN", "이 발표에 접근할 권한이 없어요.", 403)
+    return presentation
