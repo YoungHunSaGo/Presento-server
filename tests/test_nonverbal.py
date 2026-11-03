@@ -161,6 +161,42 @@ def test_gaze_away_run_at_end():
     assert ranges(analyze_nonverbal(frames).gaze_away_ranges) == [(5.0, 8.0)]
 
 
+# ---------- 얼굴 없이 자세만 잡힌 프레임 ----------
+
+
+def test_pose_only_frames_count_as_gaze_away():
+    # 정면 6장 + 얼굴 없이 어깨만 잡힌 4장 → 분모 10, 정면 6
+    frames = still(6) + [frame(6 + i, yaw=None, pitch=None, p=pose()) for i in range(4)]
+    r = analyze_nonverbal(frames)
+    assert r.metrics.gaze_front_ratio == 0.6
+    assert ranges(r.gaze_away_ranges) == [(6.0, 10.0)]
+    assert r.metrics.low_confidence_ranges == []
+
+
+def test_frames_without_face_and_pose_are_excluded():
+    # 정면 6장 + 얼굴·자세 둘 다 없는 4장 → 분모 6, 저신뢰 구간
+    frames = still(6) + [frame(6 + i, yaw=None, pitch=None) for i in range(4)]
+    r = analyze_nonverbal(frames)
+    assert r.metrics.gaze_front_ratio == 1.0
+    assert r.gaze_away_ranges == []
+    assert ranges(r.metrics.low_confidence_ranges) == [(6.0, 10.0)]
+
+
+def test_gaze_away_run_mixes_turned_face_and_pose_only():
+    # 각도로 벗어남 2초 + 얼굴 없이 자세만 2초가 이어지면 하나의 4초 구간
+    frames = still(5) + [frame(5 + i, yaw=40) for i in range(2)]
+    frames += [frame(7 + i, yaw=None, pitch=None, p=pose()) for i in range(2)]
+    frames += still(5, start=9)
+    assert ranges(analyze_nonverbal(frames).gaze_away_ranges) == [(5.0, 9.0)]
+
+
+def test_no_face_rule_still_counts_face_frames_only():
+    # 자세만 잡힌 프레임이 많아도 얼굴 프레임이 20% 미만이면 NO_FACE_DETECTED
+    frames = still(1) + [frame(1 + i, yaw=None, pitch=None, p=pose()) for i in range(9)]
+    with pytest.raises(NoFaceDetected):
+        analyze_nonverbal(frames)
+
+
 # ---------- 얼굴 신뢰도 ----------
 
 
@@ -260,10 +296,13 @@ def test_short_tail_window_is_ignored():
 def test_posture_not_measured_without_pose():
     frames = [FrameObs(t=i, yaw=0.0, pitch=0.0, pose=None) for i in range(30)]
     r = analyze_nonverbal(frames)
-    assert not r.posture_measured
-    assert r.metrics.posture_stability == 1.0
-    assert r.metrics.gesture_per_min == 0.0
+    assert not r.posture_measured and not r.gesture_measured
+    assert r.metrics.posture_stability is None  # 측정 불가 → null
+    assert r.metrics.gesture_per_min is None
+    assert r.metrics.gaze_front_ratio == 1.0
     assert r.gesture_none_ranges == [] and r.gesture_excess_ranges == []
+    dumped = r.metrics.model_dump(by_alias=True)
+    assert dumped["postureStability"] is None and dumped["gesturePerMin"] is None
 
 
 def test_posture_measured_threshold():
@@ -272,12 +311,17 @@ def test_posture_measured_threshold():
     assert analyze_nonverbal(still(10)).posture_measured
 
 
-def test_frames_in_low_confidence_range_are_excluded_from_posture():
-    wild = pose(dx=3.0, dy=-2.0)
-    frames = still(10) + [frame(10 + i, yaw=None, pitch=None, p=wild) for i in range(3)]
-    frames += still(10, start=13)
+def test_pose_only_frames_are_used_for_posture():
+    # 얼굴은 없고 자세만 잡힌(고개를 돌린) 프레임도 자세 계산에 들어간다
+    frames = still(10)
+    frames += [
+        frame(10 + i, yaw=None, pitch=None, p=pose(dx=0.2 if i % 2 else -0.2)) for i in range(10)
+    ]
+    frames += still(10, start=20)
     r = analyze_nonverbal(frames)
-    assert r.metrics.posture_stability == 1.0
+    assert r.metrics.posture_stability < 1.0
+    assert ranges(r.posture_unstable_ranges) == [(10.0, 20.0)]
+    assert r.metrics.low_confidence_ranges == []
 
 
 def test_tiny_shoulder_width_frames_are_skipped():
@@ -374,7 +418,8 @@ def test_wrists_not_visible_means_gesture_not_measured():
     frames = [frame(i, p=pose(lw=None, rw=None)) for i in range(60)]
     r = analyze_nonverbal(frames)
     assert r.posture_measured and not r.gesture_measured
-    assert r.metrics.gesture_per_min == 0.0
+    assert r.metrics.gesture_per_min is None
+    assert r.metrics.posture_stability == 1.0
     assert r.gesture_none_ranges == [] and r.gesture_times == []
 
 
@@ -498,8 +543,12 @@ def test_metrics_match_spec_shape():
         "lowConfidenceRanges",
     }
     assert dumped["lowConfidenceRanges"] == [{"start": 5.0, "end": 8.0}]
-    for key in ("gazeFrontRatio", "postureStability"):
-        assert 0.0 <= dumped[key] <= 1.0
+    assert 0.0 <= dumped["gazeFrontRatio"] <= 1.0
+    assert dumped["postureStability"] is None  # 자세 5초 < 10초 → 측정 불가
+    r = analyze_nonverbal(still(30))
+    for key, value in r.metrics.model_dump(by_alias=True).items():
+        if key != "lowConfidenceRanges":
+            assert value is not None
 
 
 # ---------- MediaPipe 실행 ----------
@@ -572,13 +621,30 @@ def test_corrupted_model_file_is_unavailable(tmp_path):
         observe_frames([], broken, Path(POSE_MODEL))
 
 
-_face_images = sorted(FACES_DIR.glob("*.jpg")) if FACES_DIR.is_dir() else []
+FRONT_FACE = FACES_DIR / "front.jpg"
+SIDE_FACE = FACES_DIR / "side40.jpg"
+
+
+def _observe_one(path: Path) -> FrameObs:
+    return observe_frames(
+        [SampledFrame(path=path, timestamp=0.0)], Path(FACE_MODEL), Path(POSE_MODEL)
+    )[0]
 
 
 @needs_models
-@pytest.mark.skipif(not _face_images, reason="얼굴 사진 픽스처 없음(tests/fixtures/faces/*.jpg)")
-def test_mediapipe_finds_frontal_face_in_fixtures():
-    frames = [SampledFrame(path=p, timestamp=float(i)) for i, p in enumerate(_face_images)]
-    obs = observe_frames(frames, Path(FACE_MODEL), Path(POSE_MODEL))
-    assert all(o.has_face for o in obs)
-    assert all(abs(o.yaw) < 45 and abs(o.pitch) < 45 for o in obs)  # type: ignore[arg-type]
+@pytest.mark.skipif(not FRONT_FACE.is_file(), reason="tests/fixtures/faces/front.jpg 없음(README)")
+def test_mediapipe_front_face_is_front():
+    o = _observe_one(FRONT_FACE)
+    assert o.has_face
+    assert abs(o.yaw) <= nv.GAZE_YAW_MAX_DEG and abs(o.pitch) <= nv.GAZE_PITCH_MAX_DEG  # type: ignore[arg-type]
+
+
+@needs_models
+@pytest.mark.skipif(not SIDE_FACE.is_file(), reason="tests/fixtures/faces/side40.jpg 없음(README)")
+def test_mediapipe_side_face_is_away():
+    o = _observe_one(SIDE_FACE)
+    # 40도 돌린 얼굴은 얼굴이 잡히면 기준각 밖, 안 잡혀도 자세가 잡히면 시선 벗어남
+    assert o.observed
+    assert nv._is_away(o)
+    if o.has_face:
+        assert 25 <= abs(o.yaw) <= 60  # type: ignore[arg-type]

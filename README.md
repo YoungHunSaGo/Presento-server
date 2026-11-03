@@ -23,3 +23,21 @@ docker compose up --build
 ```
 
 api(8000), worker, postgres(5432), redis(6379), minio(9000, 콘솔 9001)가 뜨고, `minio-init`이 `S3_BUCKET` 버킷을 만든다.
+
+## 얼굴 사진 픽스처 (선택)
+
+`tests/test_nonverbal.py`의 실제 얼굴 인식 테스트는 사진이 없으면 건너뛴다. 돌리려면:
+
+1. 본인 얼굴 사진 2장을 JPEG로 준비한다. 상반신(어깨까지) 나오게, 긴 변 640px 정도.
+   - `front.jpg`: 카메라를 정면으로 본 사진
+   - `side40.jpg`: 고개를 옆으로 약 40도 돌린 사진
+2. `tests/fixtures/faces/`에 넣는다. 이 폴더는 `.gitignore`에 있어 커밋되지 않는다.
+3. MediaPipe 모델 경로를 주고 테스트를 돌린다.
+
+```bash
+mkdir -p tests/fixtures/faces
+cp ~/Pictures/front.jpg ~/Pictures/side40.jpg tests/fixtures/faces/
+MEDIAPIPE_FACE_MODEL_PATH=/path/to/face_landmarker.task \
+MEDIAPIPE_POSE_MODEL_PATH=/path/to/pose_landmarker_full.task \
+  .venv/bin/pytest tests/test_nonverbal.py
+```

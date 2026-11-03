@@ -417,6 +417,17 @@ await axios.put(upload.uploadUrl, file, {
 }
 ```
 
+**비언어 지표 측정 불가:** 영상에서 어깨·손목이 잘 안 보이면 해당 지표를 잴 수 없다. 이때 `gazeFrontRatio`, `postureStability`, `gesturePerMin`은 `null`로 오고, 화면에는 "측정 불가"로 표시한다(0이나 100%로 그리지 않는다).
+
+```json
+"nonverbal": {
+  "gazeFrontRatio": 0.81,
+  "postureStability": 0.9,
+  "gesturePerMin": null,
+  "lowConfidenceRanges": []
+}
+```
+
 ### 필드별 화면 매핑
 
 | 필드 | 화면에서 쓰는 곳 | 비고 |
@@ -425,8 +436,8 @@ await axios.put(upload.uploadUrl, file, {
 | `scores` | 항목별 점수 막대 또는 레이더 차트 | 항목은 항상 3개 |
 | `metrics.speech.paceSeries` | 말 속도 꺾은선 차트 | `t`는 구간 시작 초, 30초 간격 |
 | `metrics.speech.fillers` | 추임새 순위 목록 | 많은 순으로 정렬되어 옴 |
-| `metrics.nonverbal` | 비언어 지표 카드 | 비율은 0~1, 화면에서 %로 변환 |
-| `nonverbal.lowConfidenceRanges` | 타임라인에 회색 구간 | 얼굴 인식이 어려워 평가에서 뺀 구간 |
+| `metrics.nonverbal` | 비언어 지표 카드 | 비율은 0~1, 화면에서 %로 변환. `gazeFrontRatio`·`postureStability`·`gesturePerMin`은 측정 불가 시 null, 화면에는 '측정 불가'로 표시 |
+| `nonverbal.lowConfidenceRanges` | 타임라인에 회색 구간 | 얼굴과 몸이 모두 잡히지 않아 평가에서 뺀 구간 |
 | `feedbacks` | 타임라인 마커 + 피드백 목록 | 마커 클릭 시 `video.currentTime = start` |
 | `feedbacks.severity` | 마커 색 | `INFO` 파랑, `WARNING` 주황, `CRITICAL` 빨강 |
 | `feedbacks.evidence` | 피드백 카드의 근거 인용 | 실제 대본에서 가져온 문장. **evidence: 시선·자세 피드백은 null일 수 있음** (인용할 대본이 없을 때). null이면 인용 영역을 숨긴다 |

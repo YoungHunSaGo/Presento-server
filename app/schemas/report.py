@@ -74,9 +74,10 @@ class TimeRange(CamelModel):
 
 
 class NonverbalMetrics(CamelModel):
-    gaze_front_ratio: float
-    posture_stability: float
-    gesture_per_min: float
+    # 측정 불가 시 null(명세 5장)
+    gaze_front_ratio: float | None
+    posture_stability: float | None
+    gesture_per_min: float | None
     low_confidence_ranges: list[TimeRange]
 
 

@@ -9,8 +9,10 @@
 규칙:
 - 시선(gazeFrontRatio): 얼굴 변환 행렬에서 "머리 정면 방향"과 "머리→카메라 방향" 사이의
   yaw/pitch(도)를 구해 둘 다 기준각 이내인 프레임 비율. 화면 가장자리에 앉아 카메라를 봐도
-  정면으로 잡힌다. 얼굴이 잡힌 프레임만 센다.
-- 얼굴이 안 잡힌 프레임이 LOW_CONF_MIN_SEC 이상 이어진 구간은 lowConfidenceRanges.
+  정면으로 잡힌다.
+  자세(어깨)는 잡히는데 얼굴이 없는 프레임은 고개를 크게 돌린 것으로 보고 "시선 벗어남"으로
+  분모에 넣는다. 얼굴·자세가 둘 다 없는 프레임만 계산에서 뺀다.
+- 얼굴·자세가 둘 다 없는 프레임이 LOW_CONF_MIN_SEC 이상 이어진 구간은 lowConfidenceRanges.
   얼굴이 잡힌 프레임이 전체의 MIN_FACE_FRAME_RATIO 미만이면 NoFaceDetected.
 - 자세(postureStability): 어깨 중심·코 위치를 어깨 너비로 나눠 정규화하고,
   POSTURE_WINDOW_SEC 구간마다 직선 추세를 뺀 표준편차(흔들림)를 구한다.
@@ -20,11 +22,9 @@
   GESTURE_MOVE_RATIO 이상 움직이면 움직임으로 본다. GESTURE_MERGE_SEC 안에 이어진 움직임은
   한 번으로 세되, 한 번이 GESTURE_MAX_SEC를 넘게 이어지면 새로 센다(계속 움직이면 많이 센다).
   손목이 보인 시간(분)으로 나눈다.
-- 얼굴이 안 잡힌 구간(lowConfidenceRanges) 안의 프레임은 자세·제스처 계산에서도 뺀다.
 - 측정 불가: 자세가 잡힌 시간이 MIN_POSE_SEC 미만이면 posture_measured=False,
   손목이 보인 시간이 자세 시간의 MIN_WRIST_VISIBLE_RATIO 미만이면 gesture_measured=False
-  (노트북 카메라는 보통 손이 안 보인다). 이때 postureStability=1.0, gesturePerMin=0.0으로 두므로
-  피드백·점수는 measured 플래그를 봐야 한다.
+  (노트북 카메라는 보통 손이 안 보인다). 측정 불가 지표는 null로 돌려준다(명세 5장).
 - 모든 구간의 끝은 영상 길이(duration_sec)를 넘지 않는다.
 
 에러 구분(파이프라인이 분석 실패 코드로 바꾼다):
@@ -126,6 +126,11 @@ class FrameObs:
     def has_face(self) -> bool:
         return self.yaw is not None and self.pitch is not None
 
+    @property
+    def observed(self) -> bool:
+        """얼굴이나 자세 중 하나라도 잡혔다(시선 계산 대상)."""
+        return self.has_face or self.pose is not None
+
 
 @dataclass(frozen=True)
 class NonverbalAnalysis:
@@ -179,6 +184,11 @@ def _is_front(f: FrameObs) -> bool:
     return abs(f.yaw) <= GAZE_YAW_MAX_DEG and abs(f.pitch) <= GAZE_PITCH_MAX_DEG
 
 
+def _is_away(f: FrameObs) -> bool:
+    """시선 벗어남: 얼굴이 기준각 밖이거나, 자세만 잡히고 얼굴이 없다."""
+    return f.observed and not _is_front(f)
+
+
 # ---------------------------------------------------------------- 구간 도우미
 
 
@@ -213,10 +223,6 @@ def _runs(
     if start is not None:
         found.append((start, last + dt))
     return [_range(s, e, limit) for s, e in found if e - s >= min_sec - _EPS]
-
-
-def _inside(t: float, ranges: Sequence[TimeRange]) -> bool:
-    return any(r.start <= t < r.end for r in ranges)
 
 
 def _dist(a: Point, b: Point) -> float:
@@ -381,36 +387,38 @@ def analyze_nonverbal(
         if not math.isfinite(duration_sec) or duration_sec <= 0:
             raise ValueError("duration_sec must be positive")
         end = min(end, duration_sec)
-    low_conf = _runs(frames, lambda f: not f.has_face, dt, LOW_CONF_MIN_SEC, end)
+    low_conf = _runs(frames, lambda f: not f.observed, dt, LOW_CONF_MIN_SEC, end)
 
-    front = sum(1 for f in face_frames if _is_front(f))
-    gaze_ratio = round(front / len(face_frames), _DECIMALS)
-    gaze_away = _runs(frames, lambda f: f.has_face and not _is_front(f), dt, GAZE_AWAY_MIN_SEC, end)
+    observed = [f for f in frames if f.observed]
+    front = sum(1 for f in observed if _is_front(f))
+    gaze_ratio = round(front / len(observed), _DECIMALS) if observed else None
+    gaze_away = _runs(frames, _is_away, dt, GAZE_AWAY_MIN_SEC, end)
 
+    # 얼굴·자세가 둘 다 없는 프레임은 pose가 None이라 여기서 자연히 빠진다.
     pose_frames = [
         f
         for f in frames
-        if f.pose is not None
-        and f.pose.shoulder_width >= MIN_SHOULDER_WIDTH_RATIO
-        and not _inside(f.t, low_conf)
+        if f.pose is not None and f.pose.shoulder_width >= MIN_SHOULDER_WIDTH_RATIO
     ]
     pose_sec = len(pose_frames) * dt
     posture_measured = pose_sec >= MIN_POSE_SEC - _EPS
+    stability: float | None = None
+    unstable: list[TimeRange] = []
     if posture_measured:
         stability, unstable = _posture(pose_frames, dt, start, end)
-    else:
-        stability, unstable = 1.0, []
 
     wrist_frames = [f for f in pose_frames if f.pose is not None and f.pose.any_wrist]
     wrist_sec = len(wrist_frames) * dt
     gesture_measured = posture_measured and wrist_sec >= pose_sec * MIN_WRIST_VISIBLE_RATIO - _EPS
+    gestures: list[float] = []
+    gesture_per_min: float | None = None
+    g_none: list[TimeRange] = []
+    g_excess: list[TimeRange] = []
     if gesture_measured:
         width = statistics.median(f.pose.shoulder_width for f in pose_frames if f.pose)
         gestures = _gesture_times(pose_frames, dt, width)
         gesture_per_min = round(len(gestures) / (wrist_sec / 60), _DECIMALS)
         g_none, g_excess = _gesture_windows(wrist_frames, gestures, dt, start, end)
-    else:
-        gestures, gesture_per_min, g_none, g_excess = [], 0.0, [], []
 
     return NonverbalAnalysis(
         metrics=NonverbalMetrics(
