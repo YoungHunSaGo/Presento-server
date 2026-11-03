@@ -3,8 +3,8 @@
 !.env.example
 .venv/
 .git/
-__pycache__/
-*.pyc
+**/__pycache__/
+**/*.pyc
 .pytest_cache/
 .ruff_cache/
 .DS_Store

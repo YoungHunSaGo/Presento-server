@@ -57,7 +57,7 @@ async def _app_error_handler(_: Request, exc: AppError) -> JSONResponse:
 
 
 def _reason_ko(err: dict[str, Any]) -> str:
-    """Pydantic 오류 타입을 한국어 이유로 바꾼다. 모르는 타입은 원문을 그대로 쓴다."""
+    """Pydantic 오류 타입을 한국어 이유로 바꾼다. 모르는 타입은 일반 문구로 대신한다."""
     ctx = err.get("ctx") or {}
     match err.get("type"):
         case "missing":
@@ -76,8 +76,16 @@ def _reason_ko(err: dict[str, Any]) -> str:
             return "허용 범위를 벗어난 값이에요."
         case "value_error" if "email" in str(err.get("msg", "")).lower():
             return "올바른 이메일 형식이 아니에요."
+        case "string_type":
+            return "문자열로 입력해 주세요."
+        case "bool_type" | "bool_parsing":
+            return "true 또는 false로 입력해 주세요."
+        case "list_type":
+            return "목록 형식으로 입력해 주세요."
+        case "dict_type" | "model_type" | "model_attributes_type":
+            return "JSON 객체 형식으로 보내 주세요."
         case _:
-            return str(err.get("msg", ""))
+            return "형식이 올바르지 않아요."
 
 
 async def _validation_error_handler(_: Request, exc: RequestValidationError) -> JSONResponse:

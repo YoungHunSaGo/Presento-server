@@ -4,6 +4,7 @@ from pydantic import SecretStr
 
 from app.core.config import Settings, get_settings
 from app.main import create_app
+from app.models import Base
 
 
 @pytest.fixture(autouse=True)
@@ -24,6 +25,7 @@ def settings() -> Settings:
         openai_api_key=SecretStr("test-openai-key"),
         openai_llm_model="test-model",
         jwt_secret=SecretStr("test-jwt-secret-for-pytest-only-0000"),
+        bcrypt_rounds=4,
         database_url="sqlite+pysqlite:///:memory:",
         redis_url="redis://localhost:6379/15",
         cors_origins="http://localhost:5173",
@@ -32,10 +34,44 @@ def settings() -> Settings:
 
 @pytest.fixture
 def app(settings: Settings):
-    return create_app(settings)
+    app = create_app(settings)
+    Base.metadata.create_all(app.state.engine)
+    yield app
+    app.state.engine.dispose()
 
 
 @pytest.fixture
 def client(app) -> TestClient:
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture
+def db(app):
+    session = app.state.session_factory()
+    yield session
+    session.close()
+
+
+@pytest.fixture
+def signup(client):
+    """회원가입 후 응답 JSON을 돌려주는 헬퍼."""
+
+    def _signup(
+        email: str = "student@ycu.ac.kr",
+        password: str = "presento1234",
+        nickname: str = "영훈",
+    ) -> dict:
+        res = client.post(
+            "/api/v1/auth/signup",
+            json={"email": email, "password": password, "nickname": nickname},
+        )
+        assert res.status_code == 201, res.text
+        return res.json()
+
+    return _signup
+
+
+@pytest.fixture
+def auth_headers(signup) -> dict[str, str]:
+    return {"Authorization": f"Bearer {signup()['accessToken']}"}

@@ -16,6 +16,8 @@ RUN mkdir app && touch app/__init__.py \
     && pip install . && pip uninstall -y presento-server && rm -rf app build *.egg-info
 COPY app ./app
 RUN pip install --no-deps .
+COPY alembic.ini ./
+COPY alembic ./alembic
 
 RUN useradd --create-home --uid 1000 presento
 USER presento

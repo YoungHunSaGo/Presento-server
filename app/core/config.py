@@ -5,7 +5,7 @@
 
 from functools import lru_cache
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,7 +23,8 @@ class Settings(BaseSettings):
 
     # 인증
     jwt_secret: SecretStr
-    jwt_expire_hours: int = 24
+    jwt_expire_hours: int = Field(default=24, ge=1)
+    bcrypt_rounds: int = Field(default=12, ge=4, le=16)
 
     # DB / 큐
     database_url: str = "postgresql+psycopg://presento:presento@localhost:5432/presento"
