@@ -277,7 +277,9 @@ def test_patch_validation(client, create, auth_headers, body):
 # ---------- P5 ----------
 
 
-def test_delete_removes_presentation_analyses_and_files(client, create, auth_headers, db, storage):
+def test_delete_removes_presentation_analyses_and_files(
+    client, create, auth_headers, db, storage, queue
+):
     pid = create()["id"]
     a1_id = _completed(db, pid, 1, 70, video_key=f"videos/{pid}-1").id
     _add_analysis(db, pid, 2, "FAILED", video_key=f"videos/{pid}-2")
@@ -293,12 +295,28 @@ def test_delete_removes_presentation_analyses_and_files(client, create, auth_hea
     db.expire_all()
     assert db.get(Analysis, a1_id) is None
     assert db.query(Analysis).count() == 0
-    assert set(storage.deleted) == {f"videos/{pid}-1", f"videos/{pid}-2", f"slides/{pid}/x.pdf"}
+    # S3 정리는 워커에게 맡긴다(요청 안에서 지우지 않음).
+    assert queue.deleted_keys == {f"videos/{pid}-1", f"videos/{pid}-2", f"slides/{pid}/x.pdf"}
+    assert storage.deleted == []
 
 
-def test_delete_succeeds_even_if_storage_delete_fails(client, create, auth_headers, db, storage):
+def test_delete_falls_back_to_inline_when_queue_down(
+    client, create, auth_headers, db, storage, queue
+):
     pid = create()["id"]
     _completed(db, pid, 1, 70, video_key="videos/x")
+    queue.fail = True
+    res = client.delete(f"{BASE}/{pid}", headers=auth_headers)
+    assert res.status_code == 204
+    assert storage.deleted == ["videos/x"]
+
+
+def test_delete_succeeds_even_if_queue_and_storage_fail(
+    client, create, auth_headers, db, storage, queue
+):
+    pid = create()["id"]
+    _completed(db, pid, 1, 70, video_key="videos/x")
+    queue.fail = True
     storage.fail_delete = True
     res = client.delete(f"{BASE}/{pid}", headers=auth_headers)
     assert res.status_code == 204
@@ -400,18 +418,39 @@ def test_oversized_upload_is_discarded(client, create, auth_headers, storage):
     assert key in storage.deleted
 
 
-def test_reupload_replaces_old_slides(client, create, auth_headers, storage):
+def test_reupload_overwrites_same_key(client, create, auth_headers, storage):
     pid = create()["id"]
     first = _issue_slides(client, pid, auth_headers, storage)
     storage.objects[first] = 100
-    client.get(f"{BASE}/{pid}", headers=auth_headers)
+    client.get(f"{BASE}/{pid}", headers=auth_headers)  # hasSlides 확정
 
     second = _issue_slides(client, pid, auth_headers, storage)
-    assert second != first
-    storage.objects[second] = 200
+    assert second == first  # 같은 키로 덮어쓰는 URL
     assert client.get(f"{BASE}/{pid}", headers=auth_headers).json()["hasSlides"] is True
-    assert first in storage.deleted
-    assert second not in storage.deleted
+    assert storage.deleted == []
+
+
+def test_no_head_after_has_slides_is_true(client, create, auth_headers, storage):
+    pid = create()["id"]
+    key = _issue_slides(client, pid, auth_headers, storage)
+    storage.objects[key] = 100
+    assert client.get(f"{BASE}/{pid}", headers=auth_headers).json()["hasSlides"] is True
+    storage.head_calls.clear()
+
+    client.get(f"{BASE}/{pid}", headers=auth_headers)
+    client.get(BASE, headers=auth_headers)
+    client.patch(f"{BASE}/{pid}", json={"title": "바뀜"}, headers=auth_headers)
+    _issue_slides(client, pid, auth_headers, storage)  # 다시 올리기
+    client.get(f"{BASE}/{pid}", headers=auth_headers)
+    assert storage.head_calls == []
+
+
+@pytest.mark.parametrize(("value", "status_code"), [(600, 201), (601, 400), (1, 201)])
+def test_time_limit_range_1_to_600(client, auth_headers, value, status_code):
+    res = client.post(
+        BASE, json={"title": "t", "purpose": "CLASS", "timeLimitSec": value}, headers=auth_headers
+    )
+    assert res.status_code == status_code
 
 
 def test_storage_failure_does_not_break_reads(client, create, auth_headers, storage):

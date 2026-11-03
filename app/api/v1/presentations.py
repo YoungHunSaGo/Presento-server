@@ -3,10 +3,16 @@
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Query, Response, status
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_db, get_owned_presentation, get_storage
+from app.api.deps import (
+    get_current_user,
+    get_db,
+    get_owned_presentation,
+    get_queue,
+    get_storage,
+)
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError
 from app.models import Analysis, AnalysisStatus, Presentation, User
@@ -23,13 +29,14 @@ from app.schemas.presentation import (
     SlidesUploadRequest,
     UploadUrlResponse,
 )
-from app.services.slides import confirm_pending_slides, new_slides_key
-from app.services.storage import Storage, delete_quietly
+from app.services.cleanup import delete_objects_later
+from app.services.queue import TaskQueue
+from app.services.slides import new_slides_key, refresh_pending_slides
+from app.services.storage import Storage
 
 router = APIRouter(prefix="/presentations", tags=["presentations"])
 
 PDF_CONTENT_TYPE = "application/pdf"
-MAX_SLIDE_CHECKS_PER_REQUEST = 5
 MAX_PAGE = 10_000  # 큰 OFFSET이 DB 정수 범위를 넘지 않게
 
 _AUTH_DOCS = {401: {"model": ErrorResponse, "description": "UNAUTHORIZED"}}
@@ -98,22 +105,13 @@ def _one_response(db: Session, p: Presentation) -> PresentationResponse:
 def _refresh_slides(
     db: Session, storage: Storage, settings: Settings, presentations: list[Presentation]
 ) -> None:
-    """대기 중인 슬라이드 업로드를 확인하고, 바뀐 게 있으면 커밋 후 옛 파일을 지운다.
-
-    스토리지 장애 시 목록 조회가 오래 멈추지 않게 요청당 확인 개수를 제한한다.
-    """
-    to_delete: list[str | None] = []
-    changed = False
-    pending = [p for p in presentations if p.slides_pending_key][:MAX_SLIDE_CHECKS_PER_REQUEST]
-    for p in pending:
-        before = (p.slides_key, p.slides_pending_key)
-        to_delete += confirm_pending_slides(
-            p, storage, settings.max_slides_bytes, settings.slides_upload_url_expires_sec
-        )
-        changed = changed or before != (p.slides_key, p.slides_pending_key)
-    if changed:
-        db.commit()
-        delete_quietly(storage, to_delete)
+    refresh_pending_slides(
+        db,
+        storage,
+        presentations,
+        max_bytes=settings.max_slides_bytes,
+        url_expires_sec=settings.slides_upload_url_expires_sec,
+    )
 
 
 # ---------- P1 ----------
@@ -244,11 +242,12 @@ def delete_presentation(
     p: Presentation = Depends(get_owned_presentation),
     db: Session = Depends(get_db),
     storage: Storage = Depends(get_storage),
+    queue: TaskQueue = Depends(get_queue),
 ) -> Response:
     keys = [p.slides_key, p.slides_pending_key] + [a.video_key for a in p.analyses]
-    db.delete(p)  # 회차는 cascade로 함께 삭제
+    db.delete(p)  # 회차·리포트는 cascade로 함께 삭제
     db.commit()
-    delete_quietly(storage, keys)
+    delete_objects_later(queue, storage, keys)  # S3 정리는 워커가 한다
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -282,18 +281,27 @@ def create_slides_upload_url(
 
     # 이전 URL로 이미 올린 파일이 있으면 대기 키를 덮어쓰기 전에 먼저 반영한다.
     _refresh_slides(db, storage, settings, [p])
-
-    key = new_slides_key(p.id)
     expires = settings.slides_upload_url_expires_sec
+
+    if p.slides_key is not None:
+        # 이미 확인된 슬라이드는 같은 키로 덮어쓴다 → 다시 확인(HEAD)할 필요가 없다.
+        key = p.slides_key
+    else:
+        key = new_slides_key(p.id)
+        # 아직 대기 중인 이전 키는 대개 업로드되지 않은 것이라 지울 파일이 없다.
+        # URL 발급은 사용자가 보는 수정이 아니므로 updated_at을 바꾸지 않는다.
+        result = db.execute(
+            update(Presentation)
+            .where(Presentation.id == p.id, Presentation.slides_key.is_(None))
+            .values(slides_pending_key=key, slides_pending_at=datetime.now(UTC))
+        )
+        db.commit()
+        if result.rowcount == 0:
+            # 그 사이 다른 요청이 업로드를 확인했다 → 확인된 키로 덮어쓴다.
+            db.refresh(p)
+            key = p.slides_key or key
+
     url = storage.presign_put(key, PDF_CONTENT_TYPE, expires)
-
-    # 아직 대기 중인 이전 키는 대개 업로드되지 않은 것이라 지울 파일이 없다.
-    # (HEAD 실패로 확인 못 한 경우 실제 파일일 수 있어 지우지 않는다.)
-    # URL 발급은 사용자가 보는 수정이 아니므로 updated_at을 바꾸지 않는다.
-    p.slides_pending_key = key
-    p.slides_pending_at = datetime.now(UTC)
-    db.commit()
-
     return UploadUrlResponse(
         upload_url=url,
         headers={"Content-Type": PDF_CONTENT_TYPE},

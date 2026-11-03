@@ -8,7 +8,7 @@ from app.schemas.common import CamelModel, KstDatetime
 
 Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
 # strict: JSON의 true나 "300"을 숫자로 바꿔 받지 않는다.
-TimeLimitSec = Annotated[int, Field(ge=1, le=3600, strict=True)]
+TimeLimitSec = Annotated[int, Field(ge=1, le=600, strict=True)]  # 영상 최대 10분과 같게
 
 
 class PresentationCreate(CamelModel):

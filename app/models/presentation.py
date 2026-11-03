@@ -21,6 +21,8 @@ class Presentation(Base):
     title: Mapped[str] = mapped_column(String(100))
     purpose: Mapped[str] = mapped_column(String(20))
     time_limit_sec: Mapped[int | None] = mapped_column(Integer)
+    # 마지막으로 발급한 회차 번호. 회차를 지워도 번호를 다시 쓰지 않도록 따로 센다.
+    attempt_seq: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     # 업로드가 확인된 슬라이드 PDF 키. 이 값이 있으면 hasSlides = true.
     slides_key: Mapped[str | None] = mapped_column(String(255))
@@ -36,5 +38,6 @@ class Presentation(Base):
     analyses: Mapped[list[Analysis]] = relationship(
         back_populates="presentation",
         cascade="all, delete-orphan",
+        passive_deletes=True,  # DB의 ON DELETE CASCADE에 맡겨 행마다 DELETE하지 않는다
         order_by="Analysis.attempt_no",
     )

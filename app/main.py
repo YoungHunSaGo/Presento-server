@@ -18,6 +18,8 @@ from app.core.database import make_engine, make_session_factory
 from app.core.errors import CatchAllMiddleware, register_error_handlers
 from app.core.security import warm_dummy_hash
 from app.schemas.common import ErrorResponse
+from app.services.media import probe_duration
+from app.services.queue import CeleryTaskQueue
 from app.services.storage import S3Storage
 
 _ERROR_REF = {"$ref": "#/components/schemas/ErrorResponse"}
@@ -69,6 +71,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.engine = make_engine(settings.database_url)
     app.state.session_factory = make_session_factory(app.state.engine)
     app.state.storage = S3Storage(settings)
+    app.state.queue = CeleryTaskQueue()
+    app.state.probe_duration = probe_duration
     app.dependency_overrides[get_settings] = lambda: settings
 
     # 나중에 추가한 미들웨어가 바깥쪽이다: CORS(바깥) → CatchAll(안쪽) → 라우터.

@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     video_upload_url_expires_sec: int = 900
     video_play_url_expires_sec: int = 3600
 
+    # 가짜 파이프라인(마일스톤 4): 단계당 걸리는 시간(초). 명세 요청: 1~2초
+    fake_stage_seconds: float = Field(default=1.5, ge=0, le=10)
+    # N2에서 영상 길이를 빠르게 확인할 때 ffprobe 제한 시간(초)
+    start_probe_timeout_sec: float = 10.0
+
     @field_validator("s3_endpoint_url", "s3_public_endpoint_url", mode="before")
     @classmethod
     def _blank_url_is_none(cls, v: object) -> object:

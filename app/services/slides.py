@@ -2,19 +2,28 @@
 
 명세에는 슬라이드 업로드 완료 알림 API가 없다. 그래서 P6에서 발급한 키를 대기 상태로 두고,
 발표를 조회할 때 스토리지에 실제 파일이 있는지 확인되면 hasSlides로 반영한다.
+
+- hasSlides가 한 번 true가 되면(slides_key 저장) 그 뒤로는 HEAD를 하지 않는다.
+  다시 올릴 때는 P6가 같은 키로 덮어쓰는 URL을 주므로 확인할 필요가 없다.
+- 모든 쓰기는 조건부 UPDATE로 해서, 동시에 P6가 키를 바꾼 경우 덮어쓰지 않는다.
 """
 
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import update
+from sqlalchemy.orm import Session
+
 from app.models import Presentation
-from app.services.storage import Storage, StorageError
+from app.services.storage import Storage, StorageError, delete_quietly
 
 logger = logging.getLogger(__name__)
 
 # 업로드 URL이 만료되고도 이만큼 지나도록 파일이 없으면 대기를 포기한다.
-_PENDING_GRACE = timedelta(minutes=30)
+PENDING_GRACE = timedelta(minutes=30)
+# 스토리지 장애 시 목록 조회가 오래 멈추지 않게 요청당 HEAD 횟수를 제한한다.
+MAX_CHECKS_PER_REQUEST = 5
 
 
 def new_slides_key(presentation_id: str) -> str:
@@ -25,44 +34,62 @@ def _as_aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
-def confirm_pending_slides(
-    presentation: Presentation,
+def needs_check(p: Presentation) -> bool:
+    return p.slides_key is None and p.slides_pending_key is not None
+
+
+def refresh_pending_slides(
+    db: Session,
     storage: Storage,
+    presentations: list[Presentation],
+    *,
     max_bytes: int,
     url_expires_sec: int,
     now: datetime | None = None,
-) -> list[str]:
-    """대기 중인 슬라이드가 업로드됐는지 확인해 반영한다.
-
-    presentation을 수정만 하고 커밋은 호출자가 한다. 커밋 뒤 지울 스토리지 키 목록을 돌려준다.
-    """
-    pending = presentation.slides_pending_key
-    if not pending:
-        return []
+) -> None:
+    """대기 중인 업로드를 확인해 반영한다. 바뀐 게 있으면 커밋하고 객체를 새로 읽는다."""
     now = now or datetime.now(UTC)
+    targets = [p for p in presentations if needs_check(p)][:MAX_CHECKS_PER_REQUEST]
+    to_delete: list[str] = []
+    touched: list[Presentation] = []
 
-    try:
-        size = storage.head(pending)
-    except StorageError:
-        logger.warning("Slides HEAD failed for %s", presentation.id, exc_info=True)
-        return []
+    for p in targets:
+        pending = p.slides_pending_key
+        if pending is None:
+            continue
+        try:
+            size = storage.head(pending)
+        except StorageError:
+            logger.warning("Slides HEAD failed for %s", p.id, exc_info=True)
+            continue
 
-    if size is None:
-        issued = presentation.slides_pending_at
-        deadline = timedelta(seconds=url_expires_sec) + _PENDING_GRACE
-        if issued is None or now - _as_aware(issued) > deadline:
-            presentation.slides_pending_key = None
-            presentation.slides_pending_at = None
-        return []
+        same_pending = (Presentation.id == p.id) & (Presentation.slides_pending_key == pending)
+        clear = {"slides_pending_key": None, "slides_pending_at": None}
 
-    presentation.slides_pending_key = None
-    presentation.slides_pending_at = None
-    if size > max_bytes:
-        # presigned PUT은 크기를 강제할 수 없어 여기서 거른다.
-        logger.info("Slides for %s exceed limit (%d bytes); discarded", presentation.id, size)
-        return [pending]
+        if size is None:
+            issued = p.slides_pending_at
+            deadline = timedelta(seconds=url_expires_sec) + PENDING_GRACE
+            if issued is not None and now - _as_aware(issued) <= deadline:
+                continue  # 아직 업로드 중일 수 있다
+            stmt = update(Presentation).where(same_pending).values(**clear)
+        elif size > max_bytes:
+            # presigned PUT은 크기를 강제할 수 없어 여기서 거른다.
+            logger.info("Slides for %s exceed limit (%d bytes); discarded", p.id, size)
+            stmt = update(Presentation).where(same_pending).values(**clear)
+        else:
+            stmt = (
+                update(Presentation)
+                .where(same_pending, Presentation.slides_key.is_(None))
+                .values(slides_key=pending, updated_at=now, **clear)
+            )
 
-    old = presentation.slides_key
-    presentation.slides_key = pending
-    presentation.updated_at = now  # hasSlides가 바뀌는 사용자에게 보이는 변경
-    return [old] if old else []
+        if db.execute(stmt).rowcount == 1:
+            touched.append(p)
+            if size is not None and size > max_bytes:
+                to_delete.append(pending)
+
+    if touched:
+        db.commit()
+        for p in touched:
+            db.refresh(p)
+        delete_quietly(storage, list(to_delete))

@@ -8,6 +8,7 @@ class FakeStorage:
         self.objects: dict[str, int] = {}
         self.deleted: list[str] = []
         self.presigned: list[tuple[str, str, str, int]] = []  # (method, key, content_type, exp)
+        self.head_calls: list[str] = []
         self.fail_head = False
         self.fail_delete = False
 
@@ -19,7 +20,11 @@ class FakeStorage:
         self.presigned.append(("GET", key, "", expires_in))
         return f"https://fake-s3.local/presento/{key}?X-Amz-Signature=fake"
 
+    def presign_get_internal(self, key: str, expires_in: int) -> str:
+        return f"http://fake-minio:9000/presento/{key}?X-Amz-Signature=fake"
+
     def head(self, key: str) -> int | None:
+        self.head_calls.append(key)
         if self.fail_head:
             raise StorageError("fake head failure")
         return self.objects.get(key)
@@ -29,3 +34,41 @@ class FakeStorage:
             raise StorageError("fake delete failure")
         self.objects.pop(key, None)
         self.deleted.append(key)
+
+
+class FakeQueue:
+    """Celery 대신 쓰는 큐. 넣은 작업만 기록한다."""
+
+    def __init__(self) -> None:
+        self.analyses: list[str] = []
+        self.deletes: list[list[str]] = []
+        self.fail = False
+
+    def enqueue_analysis(self, analysis_id: str) -> None:
+        if self.fail:
+            raise ConnectionError("broker down")
+        self.analyses.append(analysis_id)
+
+    def enqueue_delete(self, keys: list[str]) -> None:
+        if self.fail:
+            raise ConnectionError("broker down")
+        self.deletes.append(list(keys))
+
+    @property
+    def deleted_keys(self) -> set[str]:
+        return {k for batch in self.deletes for k in batch}
+
+
+class FakeProbe:
+    """ffprobe 대신. 기본 30초짜리 영상."""
+
+    def __init__(self, duration: float | None = 30.0) -> None:
+        self.duration = duration
+        self.error: Exception | None = None
+        self.calls: list[tuple[str, str, float, bool]] = []
+
+    def __call__(self, source: str, content_type: str, timeout: float, full_scan: bool):
+        self.calls.append((source, content_type, timeout, full_scan))
+        if self.error:
+            raise self.error
+        return self.duration

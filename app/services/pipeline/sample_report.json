@@ -1,0 +1,154 @@
+{
+  "analysisId": "a-9d21",
+  "presentationId": "p-7f3c",
+  "attemptNo": 3,
+  "purpose": "CLASS",
+  "durationSec": 287.4,
+  "createdAt": "2026-11-05T20:00:00+09:00",
+  "overall": {
+    "score": 82,
+    "grade": "B+",
+    "summary": "핵심 메시지가 분명하고 시선 처리가 안정적이에요. 도입부 말 속도와 '약간' 같은 추임새만 줄이면 좋아요.",
+    "strengths": [
+      "결론에서 핵심을 다시 정리함",
+      "정면 시선 비율이 높음"
+    ],
+    "improvements": [
+      "도입 30초의 말 속도가 빠름",
+      "'약간', '이제' 반복"
+    ]
+  },
+  "scores": [
+    {
+      "category": "DELIVERY",
+      "label": "전달력",
+      "score": 80
+    },
+    {
+      "category": "NONVERBAL",
+      "label": "비언어",
+      "score": 84
+    },
+    {
+      "category": "CONTENT",
+      "label": "내용 구성",
+      "score": 81
+    }
+  ],
+  "metrics": {
+    "speech": {
+      "syllablesPerMin": 341,
+      "paceSeries": [
+        {
+          "t": 0,
+          "value": 402
+        },
+        {
+          "t": 30,
+          "value": 355
+        },
+        {
+          "t": 60,
+          "value": 330
+        }
+      ],
+      "fillerCount": 9,
+      "fillers": [
+        {
+          "word": "약간",
+          "count": 4
+        },
+        {
+          "word": "이제",
+          "count": 3
+        },
+        {
+          "word": "음",
+          "count": 2
+        }
+      ],
+      "silenceCount": 3,
+      "longestSilenceSec": 3.8,
+      "timeLimitSec": 300,
+      "overTimeSec": 0
+    },
+    "nonverbal": {
+      "gazeFrontRatio": 0.78,
+      "postureStability": 0.86,
+      "gesturePerMin": 6.2,
+      "lowConfidenceRanges": [
+        {
+          "start": 120.0,
+          "end": 128.5
+        }
+      ]
+    }
+  },
+  "feedbacks": [
+    {
+      "id": "f-01",
+      "category": "DELIVERY",
+      "type": "PACE_FAST",
+      "severity": "WARNING",
+      "start": 0.0,
+      "end": 31.2,
+      "title": "도입부 말이 빨라요",
+      "description": "첫 30초가 분당 402음절로 평균보다 18% 빨라요. 청중이 주제를 잡기 전에 넘어가요.",
+      "evidence": "오늘 저희가 발표할 주제는 AI 기반 발표 피드백 서비스인데요",
+      "suggestion": "첫 문장 뒤에 1초 쉬고, 주제 문장을 한 번 더 천천히 말해 보세요."
+    }
+  ],
+  "transcript": {
+    "segments": [
+      {
+        "id": "s-001",
+        "start": 0.0,
+        "end": 6.4,
+        "text": "안녕하세요 음 오늘 저희가 발표할 주제는",
+        "words": [
+          {
+            "text": "안녕하세요",
+            "start": 0.0,
+            "end": 0.9,
+            "tag": null
+          },
+          {
+            "text": "음",
+            "start": 1.1,
+            "end": 1.4,
+            "tag": "FILLER"
+          }
+        ]
+      }
+    ]
+  },
+  "improvedScripts": [
+    {
+      "segmentId": "s-014",
+      "start": 95.2,
+      "end": 108.0,
+      "original": "그래서 이제 약간 이 기능이 있으면 사용자가 약간 편하게 쓸 수 있을 것 같아서",
+      "improved": "이 기능으로 사용자는 연습할 때마다 고칠 점을 바로 확인할 수 있습니다.",
+      "reason": "추임새를 빼고, '것 같다'를 단정형으로 바꿔 자신감 있게 들리게 했어요."
+    }
+  ],
+  "expectedQuestions": [
+    {
+      "question": "기존 발표 연습 앱과 무엇이 다른가요?",
+      "intent": "차별점 확인",
+      "answerTip": "타임스탬프 근거 피드백을 예시 화면과 함께 설명하세요."
+    }
+  ],
+  "slideCoverage": [
+    {
+      "page": 1,
+      "covered": true,
+      "note": null
+    },
+    {
+      "page": 4,
+      "covered": false,
+      "note": "'경쟁 서비스 비교' 슬라이드를 설명하지 않았어요."
+    }
+  ]
+}

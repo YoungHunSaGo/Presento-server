@@ -5,7 +5,7 @@ from pydantic import SecretStr
 from app.core.config import Settings, get_settings
 from app.main import create_app
 from app.models import Base
-from tests.fakes import FakeStorage
+from tests.fakes import FakeProbe, FakeQueue, FakeStorage
 
 
 @pytest.fixture(autouse=True)
@@ -30,6 +30,7 @@ def settings() -> Settings:
         database_url="sqlite+pysqlite:///:memory:",
         redis_url="redis://localhost:6379/15",
         cors_origins="http://localhost:5173",
+        fake_stage_seconds=0,
     )
 
 
@@ -39,9 +40,22 @@ def storage() -> FakeStorage:
 
 
 @pytest.fixture
-def app(settings: Settings, storage: FakeStorage):
+def queue() -> FakeQueue:
+    return FakeQueue()
+
+
+@pytest.fixture
+def probe() -> FakeProbe:
+    return FakeProbe()
+
+
+@pytest.fixture
+def app(settings: Settings, storage: FakeStorage, queue: FakeQueue, probe: FakeProbe):
     app = create_app(settings)
-    app.state.storage = storage  # 테스트는 실제 S3/MinIO를 호출하지 않는다
+    # 테스트는 실제 S3/MinIO, Redis/Celery, ffprobe를 호출하지 않는다.
+    app.state.storage = storage
+    app.state.queue = queue
+    app.state.probe_duration = probe
     Base.metadata.create_all(app.state.engine)
     yield app
     app.state.engine.dispose()

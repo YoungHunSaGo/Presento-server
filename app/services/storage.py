@@ -19,6 +19,7 @@ class StorageError(Exception):
 class Storage(Protocol):
     def presign_put(self, key: str, content_type: str, expires_in: int) -> str: ...
     def presign_get(self, key: str, expires_in: int) -> str: ...
+    def presign_get_internal(self, key: str, expires_in: int) -> str: ...
     def head(self, key: str) -> int | None: ...
     def delete(self, key: str) -> None: ...
 
@@ -55,6 +56,12 @@ class S3Storage:
 
     def presign_get(self, key: str, expires_in: int) -> str:
         return self._signer.generate_presigned_url(
+            "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=expires_in
+        )
+
+    def presign_get_internal(self, key: str, expires_in: int) -> str:
+        """서버(API·워커)가 ffprobe 등으로 직접 읽을 때 쓰는 URL. 컨테이너 안 주소로 서명한다."""
+        return self._client.generate_presigned_url(
             "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=expires_in
         )
 
