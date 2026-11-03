@@ -237,6 +237,7 @@ API는 16개이고, 영상 분석의 핵심 흐름은 **"업로드 URL 발급 �
 
 - `contentType`: `video/mp4`, `video/quicktime`(mov), `video/webm` 중 하나. 웹 녹화는 크롬이 webm, 사파리가 mp4로 나온다.
 - `fileSize`: 바이트. 500MB 이하. `source`: `UPLOAD` 또는 `RECORDING`.
+- 하루 분석 횟수가 이미 찼으면 `429 RATE_LIMITED`.
 
 응답 `201`
 
