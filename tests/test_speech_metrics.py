@@ -86,13 +86,20 @@ def test_always_filler_with_suffix_is_not_filler():
     assert all(t is None for _, t in tags(r))
 
 
-# ---------- 문맥 추임새: 쉼 기준 ----------
+# ---------- 문맥 추임새: 뒤 쉼 기준 ----------
 
 
 @pytest.mark.parametrize("word", sorted(fillers_ko.CONTEXT_FILLERS))
-def test_context_filler_with_pause_before_is_filler(word):
-    r = analyze_speech(tr([("저희가", 0.0, 0.5), (word, 0.8, 1.0), ("발표", 1.0, 1.4)]), 2.0, None)
+def test_context_filler_with_pause_after_is_filler(word):
+    r = analyze_speech(tr([("저희가", 0.0, 0.5), (word, 0.5, 0.7), ("발표", 1.0, 1.4)]), 2.0, None)
     assert tag_of(r, word) is WordTag.FILLER
+
+
+@pytest.mark.parametrize("word", sorted(fillers_ko.CONTEXT_FILLERS))
+def test_context_filler_with_only_pause_before_is_not_filler(word):
+    # 앞 쉼 1초, 뒤 쉼 없음 → 세지 않는다("…했습니다. [쉼] 그 결과는")
+    r = analyze_speech(tr([("저희가", 0.0, 0.5), (word, 1.5, 1.7), ("발표", 1.7, 2.0)]), 3.0, None)
+    assert tag_of(r, word) is None
 
 
 @pytest.mark.parametrize("word", sorted(fillers_ko.CONTEXT_FILLERS))
@@ -101,36 +108,33 @@ def test_context_filler_without_pause_is_not_filler(word):
     assert tag_of(r, word) is None
 
 
-def test_pause_exactly_threshold_counts():
+def test_pause_after_exactly_threshold_counts():
     assert fillers_ko.CONTEXT_PAUSE_SEC == 0.3
-    # 앞 쉼 0.3초 (0.7 - 0.4는 부동소수점으로 0.2999…)
+    # 뒤 쉼 0.3초 (0.7 - 0.4는 부동소수점으로 0.2999…)
     r = analyze_speech(
-        tr([("저희가", 0.0, 0.4), ("이제", 0.7, 1.0), ("발표", 1.0, 1.3)]), 2.0, None
-    )
-    assert tag_of(r, "이제") is WordTag.FILLER
-    # 뒤 쉼 0.3초
-    r = analyze_speech(
-        tr([("저희가", 0.0, 0.5), ("이제", 0.5, 0.8), ("발표", 1.1, 1.4)]), 2.0, None
+        tr([("저희가", 0.0, 0.2), ("이제", 0.2, 0.4), ("발표", 0.7, 1.0)]), 2.0, None
     )
     assert tag_of(r, "이제") is WordTag.FILLER
 
 
-def test_pause_just_under_threshold_does_not_count():
-    # 앞 0.29초, 뒤 0.29초
+def test_pause_after_just_under_threshold_does_not_count():
+    # 뒤 쉼 0.29초
     r = analyze_speech(
-        tr([("저희가", 0.0, 0.5), ("약간", 0.79, 1.0), ("발표", 1.29, 1.6)]), 2.0, None
+        tr([("저희가", 0.0, 0.5), ("약간", 0.5, 0.7), ("발표", 0.99, 1.3)]), 2.0, None
     )
     assert tag_of(r, "약간") is None
 
 
-def test_context_filler_at_start_or_end_needs_pause_on_inner_side():
-    # 첫 단어 앞, 마지막 단어 뒤는 쉼으로 보지 않는다
-    r = analyze_speech(tr([("이제", 1.0, 1.2), ("시작", 1.2, 1.5), ("좀", 1.5, 1.7)]), 5.0, None)
-    assert tag_of(r, "이제") is None
+def test_sentence_start_demonstrative_is_not_filler():
+    words = [("했습니다.", 0.0, 0.8), ("그", 1.5, 1.6), ("결과는", 1.6, 2.1)]
+    r = analyze_speech(tr(words), 3.0, None)
+    assert tag_of(r, "그") is None
+
+
+def test_context_filler_at_end_is_not_filler():
+    # 마지막 단어 뒤는 쉼으로 보지 않는다
+    r = analyze_speech(tr([("시작", 1.0, 1.5), ("좀", 1.5, 1.7)]), 5.0, None)
     assert tag_of(r, "좀") is None
-    r = analyze_speech(tr([("이제", 1.0, 1.2), ("시작", 1.6, 1.9), ("좀", 2.3, 2.5)]), 5.0, None)
-    assert tag_of(r, "이제") is WordTag.FILLER
-    assert tag_of(r, "좀") is WordTag.FILLER
 
 
 @pytest.mark.parametrize(
@@ -144,16 +148,53 @@ def test_words_with_particles_or_endings_are_never_fillers(word):
 
 
 def test_context_filler_with_punctuation_still_matches():
-    r = analyze_speech(tr([("저희가", 0.0, 0.5), ("그,", 0.9, 1.0), ("발표", 1.0, 1.3)]), 2.0, None)
+    r = analyze_speech(tr([("저희가", 0.0, 0.5), ("그,", 0.5, 0.6), ("발표", 1.0, 1.3)]), 2.0, None)
     assert tag_of(r, "그,") is WordTag.FILLER
     assert r.metrics.fillers[0].word == "그"
 
 
-def test_pause_is_measured_across_segments():
+def test_pause_after_is_measured_across_segments():
     r = analyze_speech(
-        tr([("저희가", 0.0, 0.5)], [("이제", 1.0, 1.2), ("발표", 1.2, 1.5)]), 2.0, None
+        tr([("저희가", 0.0, 0.5), ("이제", 0.5, 0.7)], [("발표", 1.2, 1.5)]), 2.0, None
     )
     assert tag_of(r, "이제") is WordTag.FILLER
+
+
+# ---------- 문맥 추임새: 연속 ----------
+
+
+@pytest.mark.parametrize("word", sorted(fillers_ko.CONTEXT_FILLERS))
+def test_consecutive_same_context_filler_counts_without_pause(word):
+    r = analyze_speech(
+        tr([("네", 0.0, 0.2), (word, 0.2, 0.3), (word, 0.3, 0.4), ("사람", 0.4, 0.7)]), 1.0, None
+    )
+    assert [t for _, t in tags(r)] == [None, WordTag.FILLER, WordTag.FILLER, None]
+    assert r.repeat_hits == []
+    assert [(f.word, f.count) for f in r.metrics.fillers] == [(word, 2)]
+
+
+def test_consecutive_context_filler_ignores_long_pause_between():
+    r = analyze_speech(tr([("그", 0.0, 0.1), ("그", 3.0, 3.1), ("사람", 3.1, 3.5)]), 4.0, None)
+    assert [t for _, t in tags(r)] == [WordTag.FILLER, WordTag.FILLER, None]
+
+
+def test_triple_context_filler_all_count():
+    r = analyze_speech(
+        tr([("저", 0.0, 0.1), ("저,", 0.1, 0.2), ("저", 0.2, 0.3), ("발표", 0.3, 0.6)]), 1.0, None
+    )
+    assert r.metrics.filler_count == 3
+
+
+def test_different_context_fillers_in_a_row_are_not_consecutive():
+    # "그 저"는 같은 추임새가 아니다. 뒤 쉼이 없으면 세지 않는다
+    r = analyze_speech(tr([("그", 0.0, 0.1), ("저", 0.1, 0.2), ("사람", 0.2, 0.5)]), 1.0, None)
+    assert all(t is None for _, t in tags(r))
+
+
+def test_context_filler_next_to_attached_form_is_not_consecutive():
+    # "그 그래서": 조사·어미 붙은 단어와는 연속으로 보지 않는다
+    r = analyze_speech(tr([("그", 0.0, 0.1), ("그래서", 0.1, 0.5), ("끝", 0.5, 0.7)]), 1.0, None)
+    assert all(t is None for _, t in tags(r))
 
 
 # ---------- 반복어 ----------
@@ -178,13 +219,6 @@ def test_filler_takes_precedence_over_repeat():
     r = analyze_speech(tr([("음", 0.0, 0.2), ("음", 0.2, 0.4), ("발표", 0.4, 0.8)]), 2.0, None)
     assert [t for _, t in tags(r)] == [WordTag.FILLER, WordTag.FILLER, None]
     assert r.repeat_hits == []
-
-
-def test_repeated_context_word_without_pause_is_repeat():
-    r = analyze_speech(
-        tr([("네", 0.0, 0.2), ("그", 0.2, 0.3), ("그", 0.3, 0.4), ("사람", 0.4, 0.7)]), 1.0, None
-    )
-    assert [t for _, t in tags(r)] == [None, None, WordTag.REPEAT, None]
 
 
 # ---------- 침묵·말 속도 ----------
@@ -326,7 +360,7 @@ def test_filler_stats_sorted_by_count_then_first_seen():
     words = [
         ("음", 0.0, 0.2), ("발표", 0.2, 0.5), ("어", 0.5, 0.7), ("저희가", 0.7, 1.0),
         ("어", 1.0, 1.2), ("시작", 1.2, 1.5), ("음", 1.5, 1.7), ("약간", 2.1, 2.3),
-        ("끝", 2.3, 2.5),
+        ("끝", 2.6, 2.8),
     ]  # fmt: skip
     r = analyze_speech(tr(words), 3.0, None)
     assert r.metrics.filler_count == 5
@@ -361,7 +395,8 @@ def test_empty_transcript(transcript):
     assert m.pace_series == []
     assert m.filler_count == 0 and m.fillers == []
     assert m.silence_count == 0 and m.longest_silence_sec == 0.0
-    assert m.over_time_sec == 20.0
+    assert m.over_time_sec == 0.0  # 발표 시간(말한 구간) 0초
+    assert r.speech_span_sec == 0.0
     assert r.speaking_sec == 0.0
 
 
@@ -381,30 +416,48 @@ def test_no_time_limit():
     assert r.under_time_sec == 0.0 and r.time_used_ratio is None and not r.is_under_time
 
 
-def test_over_time():
-    r = analyze_speech(tr([("가", 0.0, 1.0)]), 320.44, 300)
+def span(start: float, end: float) -> Transcript:
+    """start에 시작해 end에 끝나는 발표(중간은 1초 간격 단어)."""
+    words = [("가", float(t), t + 0.5) for t in range(int(start), int(end))]
+    words[0] = ("가", start, start + 0.5)
+    words.append(("끝", end - 0.5, end))
+    return tr(words)
+
+
+def test_over_time_uses_first_to_last_word():
+    # 영상 330초지만 말은 10초~320.44초 → 310.44초, 제한 300초 → 10.4초 초과
+    r = analyze_speech(span(10.0, 320.44), 330.0, 300)
     assert r.metrics.time_limit_sec == 300
-    assert r.metrics.over_time_sec == 20.4
+    assert r.speech_span_sec == 310.44
+    assert r.metrics.over_time_sec == 10.4
     assert r.under_time_sec == 0.0 and not r.is_under_time
 
 
+def test_dead_air_before_and_after_is_not_over_time():
+    # 영상 305초, 앞 8초·뒤 2초 무음 → 발표 295초는 제한 300초 안
+    r = analyze_speech(span(8.0, 303.0), 305.0, 300)
+    assert r.metrics.over_time_sec == 0.0
+    assert r.under_time_sec == 5.0
+
+
 def test_time_rounding_is_half_up():
-    r = analyze_speech(tr([("가", 0.0, 1.0)]), 302.25, 300)
+    r = analyze_speech(span(0.0, 302.25), 303.0, 300)
     assert r.metrics.over_time_sec == 2.3  # round(2.25, 1)은 2.2
     r = analyze_speech(tr([("가", 0.0, 1.0), ("나", 3.25, 4.0)]), 5.0, None)
     assert r.metrics.longest_silence_sec == 2.3
 
 
 @pytest.mark.parametrize(
-    ("duration", "under", "is_under"),
+    ("end", "under", "is_under"),
     [(209.9, 90.1, True), (210.0, 90.0, False), (300.0, 0.0, False)],
 )
-def test_under_time(duration, under, is_under):
-    r = analyze_speech(tr([("가", 0.0, 1.0)]), duration, 300)
+def test_under_time(end, under, is_under):
+    # 영상은 늘 400초(뒤에 빈 녹화), 말은 0초~end
+    r = analyze_speech(span(0.0, end), 400.0, 300)
     assert r.metrics.over_time_sec == 0.0
     assert r.under_time_sec == under
     assert r.is_under_time is is_under
-    assert r.time_used_ratio == round(duration / 300, 3)
+    assert r.time_used_ratio == round(end / 300, 3)
 
 
 @pytest.mark.parametrize(("duration", "limit"), [(-1.0, None), (float("nan"), None), (10.0, 0)])

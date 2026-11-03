@@ -12,11 +12,14 @@
   단, 마지막 구간이 그렇게 짧으면 차트 끝이 0으로 떨어져 보이므로 아예 넣지 않는다.
   전체 발화가 MIN_WINDOW_SPEECH_SEC보다 짧으면 syllablesPerMin도 0(타임스탬프가 몰려 값이 튐).
 - 추임새: fillers_ko 사전. 단어에서 문장부호만 떼고 통째로 같을 때만 맞는다(조사·어미 붙으면 아님).
-  문맥 추임새는 앞이나 뒤 쉼이 CONTEXT_PAUSE_SEC 이상일 때만. 첫 단어의 앞, 마지막 단어의 뒤는
-  쉼으로 보지 않는다(말을 시작·끝내기 전 쉼은 자연스럽다).
+  문맥 추임새는 뒤 쉼이 CONTEXT_PAUSE_SEC 이상일 때만(앞 쉼은 보지 않는다). 마지막 단어의 뒤는
+  쉼으로 보지 않는다(말을 끝낸 뒤 쉼은 자연스럽다). 같은 문맥 추임새가 연달아 나오면("그 그")
+  쉼과 상관없이 모두 추임새다.
 - 반복어: 바로 앞 단어와 같은 단어(문장부호 무시)는 두 번째부터 REPEAT. FILLER가 우선한다.
   사이에 침묵(SILENCE_SEC 이상)이 있으면 반복으로 보지 않는다.
 - 쉼은 "앞 단어들 중 가장 늦게 끝난 시각"부터 잰다(단어 시각이 겹쳐도 가짜 쉼이 안 생기게).
+- 시간 초과·미달은 영상 길이가 아니라 첫 단어 시작~마지막 단어 끝(speech_span_sec)으로 잰다.
+  녹화 앞뒤의 빈 시간은 발표 시간이 아니다.
 - 쉼·침묵 비교는 소수 둘째 자리로 반올림한 뒤 한다(0.7 - 0.4 = 0.2999… 같은 오차 방지).
 """
 
@@ -75,8 +78,9 @@ class SpeechAnalysis:
     silences: list[Silence]
     filler_hits: list[WordHit]
     repeat_hits: list[WordHit]
+    speech_span_sec: float  # 첫 단어 시작~마지막 단어 끝(발표 시간). 시간 초과·미달 기준
     under_time_sec: float  # 제한 시간보다 짧은 초(제한 없으면 0)
-    time_used_ratio: float | None  # 영상 길이 / 제한 시간(제한 없으면 None)
+    time_used_ratio: float | None  # 발표 시간 / 제한 시간(제한 없으면 None)
     is_under_time: bool
 
 
@@ -143,9 +147,11 @@ def _tag(items: list[_W]) -> None:
         if key in ALWAYS_FILLERS:
             cur.tag = WordTag.FILLER
         elif cur.core in CONTEXT_FILLERS:
-            before = gap_before is not None and gap_before >= CONTEXT_PAUSE_SEC
+            stutter = (prev is not None and prev.core == cur.core) or (
+                nxt is not None and nxt.core == cur.core
+            )
             after = nxt is not None and _gap(cur.word.end, nxt.word.start) >= CONTEXT_PAUSE_SEC
-            if before or after:
+            if stutter or after:
                 cur.tag = WordTag.FILLER
         if (
             cur.tag is None
@@ -267,15 +273,18 @@ def analyze_speech(
         for w, c in sorted(counts.items(), key=lambda kv: (-kv[1], first_seen[kv[0]]))
     ]
 
+    span = (
+        round(max(x.word.end for x in items) - items[0].word.start, _GAP_DECIMALS) if items else 0.0
+    )
     if time_limit_sec is None:
         over = under = 0.0
         ratio = None
         is_under = False
     else:
-        over = _round1(max(0.0, duration_sec - time_limit_sec))
-        under = _round1(max(0.0, time_limit_sec - duration_sec))
-        ratio = round(duration_sec / time_limit_sec, 3)
-        is_under = duration_sec < time_limit_sec * UNDER_TIME_RATIO
+        over = _round1(max(0.0, span - time_limit_sec))
+        under = _round1(max(0.0, time_limit_sec - span))
+        ratio = round(span / time_limit_sec, 3)
+        is_under = span < time_limit_sec * UNDER_TIME_RATIO
 
     metrics = SpeechMetrics(
         syllables_per_min=spm,
@@ -295,6 +304,7 @@ def analyze_speech(
         silences=silences,
         filler_hits=filler_hits,
         repeat_hits=repeat_hits,
+        speech_span_sec=span,
         under_time_sec=under,
         time_used_ratio=ratio,
         is_under_time=is_under,

@@ -431,7 +431,7 @@ await axios.put(upload.uploadUrl, file, {
 | `feedbacks.severity` | 마커 색 | `INFO` 파랑, `WARNING` 주황, `CRITICAL` 빨강 |
 | `feedbacks.evidence` | 피드백 카드의 근거 인용 | 실제 대본에서 가져온 문장. **evidence: 시선·자세 피드백은 null일 수 있음** (인용할 대본이 없을 때). null이면 인용 영역을 숨긴다 |
 | `transcript.segments` | 대본 탭 | 재생 중인 문장 하이라이트, 문장 클릭 시 그 초로 이동 |
-| `words.tag` | 대본 안 단어 색 | `FILLER` 추임새, `REPEAT` 반복어, `null` 일반 |
+| `words.tag` | 대본 안 단어 색 | `FILLER` 추임새, `REPEAT` 반복어, `null` 일반. REPEAT는 반복된 두 번째 단어부터 붙음 |
 | `improvedScripts` | 개선 스크립트 탭 | 원문/개선문 나란히 보기 |
 | `expectedQuestions` | 예상 질문 탭 | 5개 내외 |
 | `slideCoverage` | 슬라이드 일치도 탭 | PDF를 올린 경우에만 오고, 없으면 `null` |
