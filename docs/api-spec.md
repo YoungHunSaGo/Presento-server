@@ -460,6 +460,7 @@ await axios.put(upload.uploadUrl, file, {
 | 401 | `INVALID_CREDENTIALS` | 이메일 또는 비밀번호 틀림 |
 | 403 | `FORBIDDEN` | 다른 사람의 발표·회차 접근 |
 | 404 | `NOT_FOUND` | 없는 발표·회차 |
+| 405 | `METHOD_NOT_ALLOWED` | 경로는 있지만 지원하지 않는 HTTP 메서드로 호출 |
 | 409 | `EMAIL_ALREADY_EXISTS` | 이미 가입된 이메일 |
 | 409 | `UPLOAD_NOT_FOUND` | 업로드 전에 분석 시작 호출 |
 | 409 | `ANALYSIS_NOT_READY` | 분석 완료 전 리포트 요청 |

@@ -49,6 +49,7 @@ _HTTP_STATUS_MAP: dict[int, tuple[str, str]] = {
     401: ("UNAUTHORIZED", "로그인이 필요해요."),
     403: ("FORBIDDEN", "접근 권한이 없어요."),
     404: ("NOT_FOUND", "요청한 정보를 찾을 수 없어요."),
+    405: ("METHOD_NOT_ALLOWED", "지원하지 않는 요청 방식이에요."),
 }
 
 

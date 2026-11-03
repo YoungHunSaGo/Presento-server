@@ -116,9 +116,13 @@ def test_malformed_json_has_empty_field(err_client):
 
 
 def test_method_not_allowed_uses_error_format(err_client):
-    res = err_client.delete("/api/v1/health")
+    res = err_client.delete("/api/v1/health", headers={"Origin": "http://localhost:5173"})
     assert res.status_code == 405
-    assert set(res.json()["error"]) == {"code", "message", "details"}
+    _assert_error_shape(res.json(), "METHOD_NOT_ALLOWED")
+    assert res.json()["error"]["message"] == "지원하지 않는 요청 방식이에요."
+    assert res.json()["error"]["details"] is None
+    assert "GET" in res.headers["allow"]
+    assert res.headers["access-control-allow-origin"] == "http://localhost:5173"
 
 
 def test_openapi_documents_400_not_422(err_client):
