@@ -270,6 +270,7 @@ await axios.put(upload.uploadUrl, file, {
 응답 `202 Accepted` `{ "analysisId": "a-9d21", "status": "QUEUED" }`
 
 - 서버가 S3에 파일이 없으면 `409 UPLOAD_NOT_FOUND`, 10분을 넘는 영상이면 `422 VIDEO_TOO_LONG`.
+- 하루 분석 횟수를 넘으면 `429 RATE_LIMITED` (N1에서 이미 찬 경우 미리 알려줌).
 
 ### N3. 분석 상태 `GET /analyses/{analysisId}`
 
