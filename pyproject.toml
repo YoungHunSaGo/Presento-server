@@ -22,6 +22,7 @@ dependencies = [
     "pyjwt==2.15.1",
     "bcrypt==5.0.0",
     "mediapipe==1.2.0",
+    "openai==3.44.0",
 ]
 
 [project.optional-dependencies]

@@ -1,0 +1,41 @@
+{
+  "task": "transcribe",
+  "language": "korean",
+  "duration": 14.2,
+  "text": " 안녕하세요 음 오늘 저희가 발표할 주제는 그래서 발표 연습 서비스입니다. 시청해 주셔서 감사합니다.",
+  "segments": [
+    {
+      "id": 0, "seek": 0, "start": 0.0, "end": 6.4,
+      "text": " 안녕하세요 음 오늘 저희가 발표할 주제는",
+      "tokens": [50364, 1], "temperature": 0.0,
+      "avg_logprob": -0.21, "compression_ratio": 1.1, "no_speech_prob": 0.01
+    },
+    {
+      "id": 1, "seek": 0, "start": 6.4, "end": 10.8,
+      "text": " 그래서 발표 연습 서비스입니다.",
+      "tokens": [50684, 2], "temperature": 0.0,
+      "avg_logprob": -0.25, "compression_ratio": 1.0, "no_speech_prob": 0.02
+    },
+    {
+      "id": 2, "seek": 1080, "start": 11.0, "end": 14.2,
+      "text": " 시청해 주셔서 감사합니다.",
+      "tokens": [50914, 3], "temperature": 0.0,
+      "avg_logprob": -1.35, "compression_ratio": 0.9, "no_speech_prob": 0.82
+    }
+  ],
+  "words": [
+    { "word": "안녕하세요", "start": 0.0, "end": 0.9 },
+    { "word": "음", "start": 1.1, "end": 1.4 },
+    { "word": "오늘", "start": 2.0, "end": 2.5 },
+    { "word": "저희가", "start": 2.6, "end": 3.2 },
+    { "word": "발표할", "start": 3.4, "end": 4.1 },
+    { "word": "주제는", "start": 4.2, "end": 6.3 },
+    { "word": "그래서", "start": 6.5, "end": 7.1 },
+    { "word": "발표", "start": 7.6, "end": 8.0 },
+    { "word": "연습", "start": 8.1, "end": 8.6 },
+    { "word": "서비스입니다.", "start": 8.7, "end": 10.7 },
+    { "word": "시청해", "start": 11.2, "end": 11.9 },
+    { "word": "주셔서", "start": 12.0, "end": 12.6 },
+    { "word": "감사합니다.", "start": 12.7, "end": 13.9 }
+  ]
+}

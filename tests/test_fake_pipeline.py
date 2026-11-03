@@ -1,6 +1,5 @@
 import json
 import re
-import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -195,9 +194,15 @@ def test_deleted_mid_run_stops_quietly(app, storage, settings, make_analysis, db
     assert db.query(Report).count() == 0
 
 
-def test_pipeline_never_imports_openai(app, storage, settings, make_analysis):
+def test_pipeline_never_creates_openai_client(app, storage, settings, make_analysis, monkeypatch):
+    # 다른 테스트(stt)가 openai를 import하므로 sys.modules 대신 클라이언트 생성을 직접 감시한다.
+    import openai
+
+    created: list[str] = []
+    for cls in (openai.OpenAI, openai.AsyncOpenAI):
+        monkeypatch.setattr(cls, "__init__", lambda *a, _n=cls.__name__, **k: created.append(_n))
     _run(app, storage, settings, make_analysis())
-    assert "openai" not in sys.modules
+    assert created == []
 
 
 def test_worker_tasks_are_registered():

@@ -18,8 +18,12 @@ class Settings(BaseSettings):
 
     # OpenAI
     openai_api_key: SecretStr
-    openai_stt_model: str = "whisper-1"
     openai_llm_model: str = ""
+    # 받아쓰기 모델은 whisper-1로 고정(stt.WHISPER_MODEL). 단어 타임스탬프가 필수라 설정에 없다.
+    # OpenAI 호출 제한 시간(초)과 SDK 자동 재시도 횟수. 10분 음성 받아쓰기도 들어오게 넉넉히.
+    # 시간 초과 후 재시도는 이중 과금될 수 있어 재시도는 1번만.
+    openai_timeout_sec: float = Field(default=180.0, gt=0, le=600)
+    openai_max_retries: int = Field(default=1, ge=0, le=3)
 
     # 인증
     jwt_secret: SecretStr

@@ -13,6 +13,8 @@ def _isolate_env(monkeypatch):
     """셸에 export된 설정 변수가 테스트에 섞이지 않게 지운다."""
     for name in Settings.model_fields:
         monkeypatch.delenv(name.upper(), raising=False)
+    # 실수로 만든 OpenAI 클라이언트가 실제 API에 닿지 않게 닫힌 포트로 보낸다(크레딧 보호).
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
