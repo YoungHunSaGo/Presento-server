@@ -9,6 +9,8 @@ timestamp_granularities=["word", "segment"]로 호출하고,
   whisper 자체 판정 기준(no_speech_prob 높음 + avg_logprob 낮음)으로 버린다.
 - 단어 tag는 여기서 정하지 않는다(None). 추임새·반복어 표시는 speech_metrics가 한다.
 - 단어 타임스탬프가 필수라 모델은 whisper-1로 고정한다(설정으로 바꾸지 않는다).
+- whisper는 기본적으로 "음", "어" 같은 추임새를 지운다. 추임새 섞인 예시 문장을 prompt로 넣어
+  받아쓰기 문체를 그쪽으로 맞춘다(app/prompts/stt_v{N}.txt). 문구를 바꾸면 버전을 올린다.
 
 에러 구분(파이프라인이 분석 실패 코드로 바꾼다):
 - SttServiceError: OpenAI 호출 실패·응답 형식 이상 → AI_SERVICE_ERROR
@@ -19,6 +21,7 @@ import logging
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -38,6 +41,14 @@ NO_SPEECH_PROB_THRESHOLD = 0.6
 LOGPROB_THRESHOLD = -1.0
 
 TIME_DECIMALS = 2
+
+PROMPT_VERSION = "stt_v1"
+PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
+# whisper는 prompt의 마지막 224토큰만 쓴다. 한글은 글자당 2~3토큰일 수 있어 글자 수로 넉넉히 막는다.
+PROMPT_MAX_CHARS = 70
+# 무음에서 whisper가 prompt를 그대로 받아쓰는 경우가 있다. 문장(글자만 남긴 것)이 prompt 안에
+# 들어 있고 prompt 길이의 이 비율 이상이면 prompt 복사로 보고 버린다.
+PROMPT_COPY_MIN_RATIO = 0.6
 
 
 class SttServiceError(Exception):
@@ -69,6 +80,14 @@ class SttResult:
     duration: float  # whisper가 잰 음성 길이(초)
 
 
+@lru_cache
+def load_prompt(version: str = PROMPT_VERSION) -> str:
+    text = " ".join((PROMPTS_DIR / f"{version}.txt").read_text(encoding="utf-8").split())
+    if not text or len(text) > PROMPT_MAX_CHARS:
+        raise ValueError(f"prompt {version} must be 1~{PROMPT_MAX_CHARS} characters")
+    return text
+
+
 def make_client(settings: Settings) -> SttClient:
     return openai.OpenAI(
         api_key=settings.openai_api_key.get_secret_value(),
@@ -88,6 +107,7 @@ def transcribe(audio_path: Path, client: SttClient) -> SttResult:
 
     # 실패 시 except 밖에서 새 예외를 던진다. 원본 예외(요청 헤더에 API 키가 있음)가
     # __context__로도 따라가지 않게 하기 위함이다. 로그에는 상태 코드와 종류만 남긴다.
+    prompt = load_prompt()  # 모듈을 불러올 때 이미 검증했다(아래 _PROMPT_CHECK)
     failure: str | None = None
     try:
         with audio_path.open("rb") as f:
@@ -95,6 +115,7 @@ def transcribe(audio_path: Path, client: SttClient) -> SttResult:
                 model=WHISPER_MODEL,
                 file=f,
                 language=LANGUAGE,
+                prompt=prompt,
                 response_format="verbose_json",
                 timestamp_granularities=["word", "segment"],
             )
@@ -106,7 +127,7 @@ def transcribe(audio_path: Path, client: SttClient) -> SttResult:
         logger.warning("whisper request failed: %s", failure)
         raise SttServiceError(f"whisper request failed: {failure}")
 
-    return normalize(_as_dict(response))
+    return normalize(_as_dict(response), prompt=prompt)
 
 
 def _as_dict(response: Any) -> Mapping[str, Any]:
@@ -161,8 +182,25 @@ class _Seg:
     words: list[Word]
 
 
-def normalize(data: Mapping[str, Any]) -> SttResult:
-    """whisper verbose_json(dict)을 명세 transcript 형태로 바꾼다."""
+def _letters(text: str) -> str:
+    return "".join(ch for ch in text if ch.isalnum())
+
+
+def _is_prompt_copy(text: str, prompt_letters: str) -> bool:
+    seg = _letters(text)
+    return (
+        bool(seg)
+        and seg in prompt_letters
+        and len(seg) >= len(prompt_letters) * PROMPT_COPY_MIN_RATIO
+    )
+
+
+def normalize(data: Mapping[str, Any], prompt: str | None = None) -> SttResult:
+    """whisper verbose_json(dict)을 명세 transcript 형태로 바꾼다.
+
+    prompt를 주면 그 문장을 그대로 베낀 문장(무음 구간 환각)을 버린다.
+    """
+    prompt_letters = _letters(prompt) if prompt else ""
     duration = _num(data.get("duration"), "duration")
     if duration <= 0:
         raise NoSpeechDetected("audio duration is zero")
@@ -187,7 +225,10 @@ def normalize(data: Mapping[str, Any]) -> SttResult:
         if start >= duration:
             continue
         s, e = _clamp(start, end, duration)
-        segs.append(_Seg(s, e, " ".join(text.split()), _is_hallucination(raw), []))
+        drop = _is_hallucination(raw) or (
+            bool(prompt_letters) and _is_prompt_copy(text, prompt_letters)
+        )
+        segs.append(_Seg(s, e, " ".join(text.split()), drop, []))
     segs.sort(key=lambda x: x.start)
 
     words: list[tuple[float, float, str]] = []
@@ -247,3 +288,7 @@ def normalize(data: Mapping[str, Any]) -> SttResult:
         text=" ".join(seg.text for seg in segments),
         duration=round(duration, TIME_DECIMALS),
     )
+
+
+# 프롬프트 파일이 없거나 잘못되면 첫 분석이 아니라 워커가 뜰 때 바로 실패하게 한다.
+_PROMPT_CHECK = load_prompt()

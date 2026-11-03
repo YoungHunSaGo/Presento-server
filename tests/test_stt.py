@@ -65,6 +65,56 @@ def test_transcribe_sends_whisper1_ko_verbose_json_with_word_and_segment(audio_f
     assert call["response_format"] == "verbose_json"
     assert call["timestamp_granularities"] == ["word", "segment"]
     assert call["file_bytes"] == b"ID3fake-mp3"
+    assert call["prompt"] == "음, 어, 그러니까 음 저희가 어 발표할 주제는요."
+
+
+def test_prompt_file_is_versioned_and_short():
+    path = stt.PROMPTS_DIR / f"{stt.PROMPT_VERSION}.txt"
+    assert path.is_file()
+    prompt = stt.load_prompt()
+    assert 0 < len(prompt) <= stt.PROMPT_MAX_CHARS
+    assert "\n" not in prompt
+    for filler in ("음", "어"):
+        assert filler in prompt.replace(",", " ").split()
+
+
+def test_prompt_copy_segment_is_dropped(whisper_json):
+    prompt = stt.load_prompt()
+    whisper_json["segments"][2].update(
+        text=" 음, 어, 그러니까 음 저희가 어 발표할 주제는요.", no_speech_prob=0.1, avg_logprob=-0.3
+    )
+    whisper_json["words"][10:] = [
+        {"word": w, "start": 11.2 + i * 0.3, "end": 11.4 + i * 0.3}
+        for i, w in enumerate(
+            ["음,", "어,", "그러니까", "음", "저희가", "어", "발표할", "주제는요."]
+        )
+    ]
+    texts = [s.text for s in normalize(whisper_json, prompt=prompt).transcript.segments]
+    assert len(texts) == 2 and "그러니까" not in " ".join(texts)
+    # prompt를 안 주면 그대로 남는다
+    assert len(normalize(whisper_json).transcript.segments) == 3
+
+
+def test_real_speech_partly_matching_prompt_is_kept(whisper_json):
+    # prompt 일부와 같은 짧은 실제 발화("음 저희가")는 버리지 않는다
+    whisper_json["segments"][2].update(text=" 음 저희가", no_speech_prob=0.1, avg_logprob=-0.3)
+    segs = normalize(whisper_json, prompt=stt.load_prompt()).transcript.segments
+    assert len(segs) == 3
+
+
+def test_transcribe_drops_prompt_copy(audio_file, whisper_json):
+    whisper_json["segments"][2].update(
+        text=" 음, 어, 그러니까 음 저희가 어 발표할 주제는요.", no_speech_prob=0.1, avg_logprob=-0.3
+    )
+    result = transcribe(audio_file, FakeClient(whisper_json))
+    assert len(result.transcript.segments) == 2
+
+
+def test_prompt_too_long_is_rejected(tmp_path, monkeypatch):
+    (tmp_path / "long_v1.txt").write_text("가" * (stt.PROMPT_MAX_CHARS + 1), encoding="utf-8")
+    monkeypatch.setattr(stt, "PROMPTS_DIR", tmp_path)
+    with pytest.raises(ValueError):
+        stt.load_prompt.__wrapped__("long_v1")
 
 
 def test_transcribe_accepts_sdk_model_and_plain_dict(audio_file, whisper_json):
