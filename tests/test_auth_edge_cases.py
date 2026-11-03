@@ -38,6 +38,29 @@ def test_nickname_too_long(client):
     assert res.json()["error"]["details"][0]["field"] == "nickname"
 
 
+def test_signup_password_max_length_128(client):
+    ok = client.post(SIGNUP, json={"email": "max@b.com", "password": "a" * 128, "nickname": "n"})
+    assert ok.status_code == 201
+
+    res = client.post(SIGNUP, json={"email": "over@b.com", "password": "a" * 129, "nickname": "n"})
+    assert res.status_code == 400
+    assert _err(res) == "VALIDATION_ERROR"
+    detail = res.json()["error"]["details"][0]
+    assert detail == {"field": "password", "reason": "128자 이하로 입력해 주세요."}
+    assert "a" * 129 not in res.text
+
+
+def test_login_password_max_length_128(signup, client):
+    signup(email="max@b.com", password="a" * 128)
+    ok = client.post(LOGIN, json={"email": "max@b.com", "password": "a" * 128})
+    assert ok.status_code == 200
+
+    res = client.post(LOGIN, json={"email": "max@b.com", "password": "a" * 129})
+    assert res.status_code == 400
+    assert _err(res) == "VALIDATION_ERROR"
+    assert res.json()["error"]["details"][0]["field"] == "password"
+
+
 def test_nickname_is_trimmed(signup):
     assert signup(nickname="  영훈  ")["user"]["nickname"] == "영훈"
 
