@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     video_upload_url_expires_sec: int = 900
     video_play_url_expires_sec: int = 3600
 
+    # MediaPipe 모델 파일(Dockerfile이 빌드 때 받아 둔다). 로컬 실행은 .env로 경로 지정
+    mediapipe_face_model_path: str = "/opt/models/face_landmarker.task"
+    mediapipe_pose_model_path: str = "/opt/models/pose_landmarker_full.task"
+
     # 가짜 파이프라인(마일스톤 4): 단계당 걸리는 시간(초). 명세 요청: 1~2초
     fake_stage_seconds: float = Field(default=1.5, ge=0, le=10)
     # N2에서 영상 길이를 빠르게 확인할 때 ffprobe 제한 시간(초)
