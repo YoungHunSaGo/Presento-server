@@ -4,7 +4,7 @@ import logging
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Response, status
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
@@ -55,6 +55,28 @@ def _start_of_today_kst(now: datetime) -> datetime:
     return now.astimezone(KST).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+def _used_today(db: Session, user_id: str, now: datetime) -> int:
+    """오늘(KST) 시작한 분석 수. 기록은 회차를 지워도 남는다."""
+    return (
+        db.scalar(
+            select(func.count(AnalysisUsage.id)).where(
+                AnalysisUsage.user_id == user_id,
+                AnalysisUsage.created_at >= _start_of_today_kst(now),
+            )
+        )
+        or 0
+    )
+
+
+def _rate_limited(settings: Settings) -> AppError:
+    return AppError(
+        "RATE_LIMITED",
+        f"오늘 분석 횟수({settings.daily_analysis_limit}회)를 모두 썼어요. "
+        "내일 다시 시도해 주세요.",
+        429,
+    )
+
+
 VIDEO_TOO_LONG_MESSAGE = "영상은 10분 이하만 분석할 수 있어요."
 
 
@@ -97,22 +119,9 @@ def create_analysis(
         )
 
     now = datetime.now(UTC)
-    # 같은 사용자의 동시 요청이 제한을 함께 통과하지 않게 사용자 행을 잠근다(PostgreSQL).
-    db.execute(select(User.id).where(User.id == user.id).with_for_update())
-    used = db.scalar(
-        select(func.count(AnalysisUsage.id)).where(
-            AnalysisUsage.user_id == user.id,
-            AnalysisUsage.created_at >= _start_of_today_kst(now),
-        )
-    )
-    if (used or 0) >= settings.daily_analysis_limit:
-        db.rollback()
-        raise AppError(
-            "RATE_LIMITED",
-            f"오늘 분석 횟수({settings.daily_analysis_limit}회)를 모두 썼어요. "
-            "내일 다시 시도해 주세요.",
-            429,
-        )
+    # 차감은 N2에서 한다. 여기서는 이미 한도에 찼으면 업로드 전에 미리 알려준다.
+    if _used_today(db, user.id, now) >= settings.daily_analysis_limit:
+        raise _rate_limited(settings)
 
     # 회차 번호는 원자적으로 하나 올린다(동시 요청에도 겹치지 않고, 지운 번호를 재사용하지 않음).
     attempt_no = db.execute(
@@ -137,7 +146,6 @@ def create_analysis(
     db.add(analysis)
     db.flush()  # id 확정
     analysis.video_key = f"videos/{analysis.id}"
-    db.add(AnalysisUsage(user_id=user.id, analysis_id=analysis.id, created_at=now))
 
     expires = settings.video_upload_url_expires_sec
     url = storage.presign_put(analysis.video_key, content_type, expires)
@@ -160,7 +168,12 @@ def create_analysis(
     "/analyses/{analysis_id}/start",
     response_model=AnalysisStartResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    responses=_docs((409, "UPLOAD_NOT_FOUND"), (413, "FILE_TOO_LARGE"), (422, "VIDEO_TOO_LONG")),
+    responses=_docs(
+        (409, "UPLOAD_NOT_FOUND"),
+        (413, "FILE_TOO_LARGE"),
+        (422, "VIDEO_TOO_LONG"),
+        (429, "RATE_LIMITED"),
+    ),
 )
 def start_analysis(
     a: Analysis = Depends(get_owned_analysis),
@@ -224,27 +237,46 @@ def start_analysis(
             delete_objects_later(queue, storage, [key])
         raise _video_too_long()
 
-    # WAITING_UPLOAD → QUEUED 전환에 성공한 요청만 작업을 넣는다(중복 호출 방지).
+    now = datetime.now(UTC)
+    user_id = a.presentation.user_id
+    # 하루 횟수 차감은 여기서 한다(실제 비용이 드는 시점).
+    # 같은 사용자의 동시 요청이 한도를 함께 넘지 않게 사용자 행을 잠근다(PostgreSQL).
+    db.execute(select(User.id).where(User.id == user_id).with_for_update())
+    # 잠금을 기다리는 사이 같은 회차의 다른 N2가 먼저 시작했으면 429가 아니라 현재 상태를 준다.
+    db.refresh(a)
+    if a.status != AnalysisStatus.WAITING_UPLOAD:
+        db.rollback()
+        return AnalysisStartResponse(analysis_id=a.id, status=a.status)
+    if _used_today(db, user_id, now) >= settings.daily_analysis_limit:
+        db.rollback()
+        raise _rate_limited(settings)
+
+    # WAITING_UPLOAD → QUEUED 전환에 성공한 요청만 차감하고 작업을 넣는다(중복 호출 방지).
     claimed = db.execute(
         update(Analysis)
         .where(Analysis.id == a.id, Analysis.status == AnalysisStatus.WAITING_UPLOAD)
-        .values(status=AnalysisStatus.QUEUED, queued_at=datetime.now(UTC))
+        .values(status=AnalysisStatus.QUEUED, queued_at=now)
     ).rowcount
-    db.commit()
     if claimed != 1:
+        db.rollback()
         db.refresh(a)
         return AnalysisStartResponse(analysis_id=a.id, status=a.status)
+    usage = AnalysisUsage(user_id=user_id, analysis_id=a.id, created_at=now)
+    db.add(usage)
+    db.commit()
 
     try:
         queue.enqueue_analysis(a.id)
     except Exception:
         logger.exception("Failed to enqueue analysis %s", a.id)
-        # 다시 시도할 수 있게 되돌린다.
-        db.execute(
+        # 다시 시도할 수 있게 상태를 되돌리고 차감도 돌려준다.
+        reverted = db.execute(
             update(Analysis)
             .where(Analysis.id == a.id, Analysis.status == AnalysisStatus.QUEUED)
             .values(status=AnalysisStatus.WAITING_UPLOAD, queued_at=None)
-        )
+        ).rowcount
+        if reverted == 1:
+            db.execute(delete(AnalysisUsage).where(AnalysisUsage.id == usage.id))
         db.commit()
         raise AppError(
             "INTERNAL_ERROR", "분석을 시작하지 못했어요. 잠시 후 다시 시도해 주세요.", 500

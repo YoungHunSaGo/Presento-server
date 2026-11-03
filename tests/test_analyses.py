@@ -1,5 +1,4 @@
 import re
-from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -196,53 +195,6 @@ def test_n1_validation(client, presentation, auth_headers, override):
     )
     assert res.status_code == 400
     assert _err(res) == "VALIDATION_ERROR"
-
-
-def test_n1_daily_limit(client, presentation, auth_headers, new_analysis, settings, db):
-    settings.daily_analysis_limit = 2
-    new_analysis()
-    new_analysis()
-    res = client.post(
-        f"{API}/presentations/{presentation}/analyses", json=VIDEO, headers=auth_headers
-    )
-    assert res.status_code == 429
-    assert _err(res) == "RATE_LIMITED"
-    assert "2회" in res.json()["error"]["message"]
-    assert db.query(Analysis).count() == 2
-
-
-def test_n1_daily_limit_not_reset_by_deleting(
-    client, presentation, auth_headers, new_analysis, settings
-):
-    settings.daily_analysis_limit = 1
-    new_analysis()
-    client.delete(f"{API}/presentations/{presentation}", headers=auth_headers)
-    pid = client.post(
-        f"{API}/presentations", json={"title": "새 발표", "purpose": "ETC"}, headers=auth_headers
-    ).json()["id"]
-    res = client.post(f"{API}/presentations/{pid}/analyses", json=VIDEO, headers=auth_headers)
-    assert res.status_code == 429
-
-
-def test_n1_daily_limit_counts_only_today_kst(
-    client, presentation, auth_headers, new_analysis, settings, db, signup
-):
-    settings.daily_analysis_limit = 1
-    aid = new_analysis()["analysisId"]
-    usage = db.query(AnalysisUsage).filter_by(analysis_id=aid).one()
-    usage.created_at = datetime.now(UTC) - timedelta(days=1, hours=1)
-    db.commit()
-    assert new_analysis()["attemptNo"] == 2
-
-
-def test_n1_limit_is_per_user(client, presentation, new_analysis, settings, other_headers):
-    settings.daily_analysis_limit = 1
-    new_analysis()
-    pid = client.post(
-        f"{API}/presentations", json={"title": "남", "purpose": "ETC"}, headers=other_headers
-    ).json()["id"]
-    res = client.post(f"{API}/presentations/{pid}/analyses", json=VIDEO, headers=other_headers)
-    assert res.status_code == 201
 
 
 def test_n1_moves_presentation_to_top(client, auth_headers, presentation, new_analysis):

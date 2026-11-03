@@ -363,6 +363,18 @@ await axios.put(upload.uploadUrl, file, {
       "description": "첫 30초가 분당 402음절로 평균보다 18% 빨라요. 청중이 주제를 잡기 전에 넘어가요.",
       "evidence": "오늘 저희가 발표할 주제는 AI 기반 발표 피드백 서비스인데요",
       "suggestion": "첫 문장 뒤에 1초 쉬고, 주제 문장을 한 번 더 천천히 말해 보세요."
+    },
+    {
+      "id": "f-02",
+      "category": "NONVERBAL",
+      "type": "GAZE_AWAY",
+      "severity": "INFO",
+      "start": 152.0,
+      "end": 163.5,
+      "title": "시선이 화면 밖으로 벗어나요",
+      "description": "약 11초 동안 정면을 보지 않았어요. 슬라이드를 읽는 구간으로 보여요.",
+      "evidence": null,
+      "suggestion": "슬라이드는 핵심 단어만 확인하고, 문장을 말할 때는 카메라를 보세요."
     }
   ],
 
@@ -415,6 +427,7 @@ await axios.put(upload.uploadUrl, file, {
 | `nonverbal.lowConfidenceRanges` | 타임라인에 회색 구간 | 얼굴 인식이 어려워 평가에서 뺀 구간 |
 | `feedbacks` | 타임라인 마커 + 피드백 목록 | 마커 클릭 시 `video.currentTime = start` |
 | `feedbacks.severity` | 마커 색 | `INFO` 파랑, `WARNING` 주황, `CRITICAL` 빨강 |
+| `feedbacks.evidence` | 피드백 카드의 근거 인용 | 실제 대본에서 가져온 문장. **evidence: 시선·자세 피드백은 null일 수 있음** (인용할 대본이 없을 때). null이면 인용 영역을 숨긴다 |
 | `transcript.segments` | 대본 탭 | 재생 중인 문장 하이라이트, 문장 클릭 시 그 초로 이동 |
 | `words.tag` | 대본 안 단어 색 | `FILLER` 추임새, `REPEAT` 반복어, `null` 일반 |
 | `improvedScripts` | 개선 스크립트 탭 | 원문/개선문 나란히 보기 |
