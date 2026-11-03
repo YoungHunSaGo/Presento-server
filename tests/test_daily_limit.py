@@ -151,3 +151,30 @@ def test_limit_is_per_user(make_presentation, start, n1, auth_headers, other_hea
     settings.daily_analysis_limit = 1
     assert start(make_presentation(auth_headers), auth_headers).status_code == 202
     assert start(make_presentation(other_headers), other_headers).status_code == 202
+
+
+# 11/4 00:00 KST = 11/3 15:00 UTC. now는 11/4 KST 00:30, 03:30, 08:30, 09:30, 15:30.
+@pytest.mark.parametrize("now_kst_hour", [0, 3, 8, 9, 15])
+def test_used_today_counts_by_kst_day_at_any_hour(db, now_kst_hour):
+    """KST 0~9시(UTC로는 전날)에도 오늘 사용량을 센다. SQLite 문자열 비교 회귀 방지."""
+    from app.api.v1.analyses import _used_today
+    from app.models import User
+
+    user = User(email="q@ycu.ac.kr", password_hash="x", nickname="q")
+    db.add(user)
+    db.commit()
+    day_start = datetime(2026, 11, 3, 15, 0, tzinfo=UTC)
+    now = day_start + timedelta(hours=now_kst_hour, minutes=30)
+    db.add_all(
+        [
+            AnalysisUsage(
+                user_id=user.id, analysis_id="a0", created_at=day_start - timedelta(seconds=1)
+            ),
+            AnalysisUsage(user_id=user.id, analysis_id="a1", created_at=day_start),
+            AnalysisUsage(
+                user_id=user.id, analysis_id="a2", created_at=now - timedelta(minutes=10)
+            ),
+        ]
+    )
+    db.commit()
+    assert _used_today(db, user.id, now) == 2

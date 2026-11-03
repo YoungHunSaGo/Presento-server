@@ -52,7 +52,10 @@ def _docs(*extra: tuple[int, str]) -> dict:
 
 
 def _start_of_today_kst(now: datetime) -> datetime:
-    return now.astimezone(KST).replace(hour=0, minute=0, second=0, microsecond=0)
+    # UTC로 바꿔 돌려준다. SQLite는 시간대를 버리고 문자열로 비교해서(저장값은 UTC),
+    # KST 그대로 넘기면 KST 0~9시에 오늘 사용량이 0으로 잡힌다.
+    start = now.astimezone(KST).replace(hour=0, minute=0, second=0, microsecond=0)
+    return start.astimezone(UTC)
 
 
 def _used_today(db: Session, user_id: str, now: datetime) -> int:
