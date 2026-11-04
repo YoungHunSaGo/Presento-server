@@ -65,7 +65,10 @@ def test_transcribe_sends_whisper1_ko_verbose_json_with_word_and_segment(audio_f
     assert call["response_format"] == "verbose_json"
     assert call["timestamp_granularities"] == ["word", "segment"]
     assert call["file_bytes"] == b"ID3fake-mp3"
-    assert call["prompt"] == "음, 어, 그러니까 음 저희가 어 발표할 주제는요."
+    assert (
+        call["prompt"]
+        == "음, 어, 그 그러니까 음 저희가 어 발표할 주제는요. 그 그 이제 약간 뭐 막 설명드릴게요."
+    )
 
 
 def test_prompt_file_is_versioned_and_short():
@@ -78,21 +81,40 @@ def test_prompt_file_is_versioned_and_short():
         assert filler in prompt.replace(",", " ").split()
 
 
-def test_prompt_copy_segment_is_dropped(whisper_json):
-    prompt = stt.load_prompt()
-    whisper_json["segments"][2].update(
-        text=" 음, 어, 그러니까 음 저희가 어 발표할 주제는요.", no_speech_prob=0.1, avg_logprob=-0.3
-    )
+def _copy_segment(whisper_json, text):
+    whisper_json["segments"][2].update(text=" " + text, no_speech_prob=0.1, avg_logprob=-0.3)
+    words = text.split()
     whisper_json["words"][10:] = [
-        {"word": w, "start": 11.2 + i * 0.3, "end": 11.4 + i * 0.3}
-        for i, w in enumerate(
-            ["음,", "어,", "그러니까", "음", "저희가", "어", "발표할", "주제는요."]
-        )
+        {"word": w, "start": 11.2 + i * 0.3, "end": 11.4 + i * 0.3} for i, w in enumerate(words)
     ]
+
+
+@pytest.mark.parametrize("part", ["all", "first", "second"])
+def test_prompt_copy_segment_is_dropped(whisper_json, part):
+    # whisper가 prompt 전체나 한 문장만 베껴도 버린다(prompt v2는 두 문장)
+    prompt = stt.load_prompt()
+    sentences = [x.strip() for x in prompt.split(".") if x.strip()]
+    text = {"all": prompt, "first": sentences[0] + ".", "second": sentences[-1] + "."}[part]
+    _copy_segment(whisper_json, text)
     texts = [s.text for s in normalize(whisper_json, prompt=prompt).transcript.segments]
-    assert len(texts) == 2 and "그러니까" not in " ".join(texts)
+    assert (
+        len(texts) == 2
+        and "그러니까" not in " ".join(texts)
+        and "설명드릴게요" not in " ".join(texts)
+    )
     # prompt를 안 주면 그대로 남는다
     assert len(normalize(whisper_json).transcript.segments) == 3
+
+
+@pytest.mark.parametrize(
+    "speech",
+    ["저희가 어 발표할 주제는요.", "음 저희가 어 발표할 주제는요", "이제 약간 뭐 막 설명드릴게요.",
+     "그 그 이제 약간 뭐 막", "어 발표할 주제는요"],
+)  # fmt: skip
+def test_real_speech_resembling_prompt_is_kept(whisper_json, speech):
+    # prompt 문장의 일부만 같은 실제 발화(발표 첫머리에 흔한 말)는 버리지 않는다
+    _copy_segment(whisper_json, speech)
+    assert len(normalize(whisper_json, prompt=stt.load_prompt()).transcript.segments) == 3
 
 
 def test_real_speech_partly_matching_prompt_is_kept(whisper_json):
@@ -103,9 +125,7 @@ def test_real_speech_partly_matching_prompt_is_kept(whisper_json):
 
 
 def test_transcribe_drops_prompt_copy(audio_file, whisper_json):
-    whisper_json["segments"][2].update(
-        text=" 음, 어, 그러니까 음 저희가 어 발표할 주제는요.", no_speech_prob=0.1, avg_logprob=-0.3
-    )
+    _copy_segment(whisper_json, stt.load_prompt())
     result = transcribe(audio_file, FakeClient(whisper_json))
     assert len(result.transcript.segments) == 2
 

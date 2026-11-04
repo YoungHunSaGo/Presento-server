@@ -19,6 +19,7 @@ timestamp_granularities=["word", "segment"]로 호출하고,
 
 import logging
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
@@ -42,13 +43,13 @@ LOGPROB_THRESHOLD = -1.0
 
 TIME_DECIMALS = 2
 
-PROMPT_VERSION = "stt_v1"
+PROMPT_VERSION = "stt_v2"  # v2: "그 그"·문맥 추임새 예시 추가(v1 대비 실영상 비교 후 채택)
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 # whisper는 prompt의 마지막 224토큰만 쓴다. 한글은 글자당 2~3토큰일 수 있어 글자 수로 넉넉히 막는다.
 PROMPT_MAX_CHARS = 70
-# 무음에서 whisper가 prompt를 그대로 받아쓰는 경우가 있다. 문장(글자만 남긴 것)이 prompt 안에
-# 들어 있고 prompt 길이의 이 비율 이상이면 prompt 복사로 보고 버린다.
-PROMPT_COPY_MIN_RATIO = 0.6
+# 무음에서 whisper가 prompt를 그대로 받아쓰는 경우가 있다. 문장(글자만 남긴 것)이 prompt 전체나
+# prompt의 한 문장 안에 들어 있고 그 길이의 이 비율 이상이면 prompt 복사로 보고 버린다.
+PROMPT_COPY_MIN_RATIO = 0.9
 
 
 class SttServiceError(Exception):
@@ -186,13 +187,20 @@ def _letters(text: str) -> str:
     return "".join(ch for ch in text if ch.isalnum())
 
 
-def _is_prompt_copy(text: str, prompt_letters: str) -> bool:
+def _prompt_units(prompt: str) -> list[str]:
+    """베끼기 판정 단위: prompt 전체와 문장 각각(글자만)."""
+    sentences = [_letters(x) for x in re.split(r"[.!?]", prompt)]
+    return [u for u in [_letters(prompt), *sentences] if u]
+
+
+def _is_prompt_copy(text: str, units: list[str]) -> bool:
+    """prompt 전체나 한 문장을 거의 그대로(PROMPT_COPY_MIN_RATIO 이상) 베낀 문장인가.
+
+    whisper의 prompt 베끼기는 거의 늘 문장 단위다. 문장의 일부만 같은 실제 발화
+    ("음 저희가 어 발표할 주제는요"처럼 발표 첫머리에 흔한 말)는 버리지 않는다.
+    """
     seg = _letters(text)
-    return (
-        bool(seg)
-        and seg in prompt_letters
-        and len(seg) >= len(prompt_letters) * PROMPT_COPY_MIN_RATIO
-    )
+    return bool(seg) and any(seg in u and len(seg) >= len(u) * PROMPT_COPY_MIN_RATIO for u in units)
 
 
 def normalize(data: Mapping[str, Any], prompt: str | None = None) -> SttResult:
@@ -200,7 +208,7 @@ def normalize(data: Mapping[str, Any], prompt: str | None = None) -> SttResult:
 
     prompt를 주면 그 문장을 그대로 베낀 문장(무음 구간 환각)을 버린다.
     """
-    prompt_letters = _letters(prompt) if prompt else ""
+    units = _prompt_units(prompt) if prompt else []
     duration = _num(data.get("duration"), "duration")
     if duration <= 0:
         raise NoSpeechDetected("audio duration is zero")
@@ -225,9 +233,7 @@ def normalize(data: Mapping[str, Any], prompt: str | None = None) -> SttResult:
         if start >= duration:
             continue
         s, e = _clamp(start, end, duration)
-        drop = _is_hallucination(raw) or (
-            bool(prompt_letters) and _is_prompt_copy(text, prompt_letters)
-        )
+        drop = _is_hallucination(raw) or (bool(units) and _is_prompt_copy(text, units))
         segs.append(_Seg(s, e, " ".join(text.split()), drop, []))
     segs.sort(key=lambda x: x.start)
 
