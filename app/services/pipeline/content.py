@@ -38,7 +38,7 @@ import json
 import logging
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -50,7 +50,7 @@ from app.core.config import Settings
 from app.models.enums import Purpose
 from app.schemas.report import ExpectedQuestion, SlideCoverage, Transcript
 from app.services.pipeline import llm
-from app.services.pipeline.korean_style import count_formal
+from app.services.pipeline.korean_style import to_haeyo
 from app.services.pipeline.llm import LlmClient
 
 logger = logging.getLogger(__name__)
@@ -570,16 +570,43 @@ def _postprocess(raw: _LlmContent, data: ContentInput, sent_ids: set[str]) -> Co
 # ---------------------------------------------------------------- 진입점
 
 
-def _warn_formal(result: ContentAnalysis) -> None:
-    texts: list[str | None] = [result.key_message]
-    texts += [i.reason for i in result.issues]
-    texts += [s.note for s in result.slide_coverage or []]
-    for q in result.expected_questions:
-        texts += [q.question, q.intent, q.answer_tip]
-    n = count_formal(texts)
-    if n:
+def _haeyo(result: ContentAnalysis) -> ContentAnalysis:
+    """LLM 글 끝의 합쇼체를 해요체로 바꾸고, 바꾸지 못한 것만 경고한다(재시도 없음)."""
+    left = 0
+
+    def fix(text: str | None) -> str | None:
+        nonlocal left
+        out, n = to_haeyo(text)
+        left += n
+        return out
+
+    issues = [replace(i, reason=fix(i.reason) or i.reason) for i in result.issues]
+    coverage = (
+        [s.model_copy(update={"note": fix(s.note)}) for s in result.slide_coverage]
+        if result.slide_coverage is not None
+        else None
+    )
+    questions = [
+        q.model_copy(
+            update={
+                "question": fix(q.question),
+                "intent": fix(q.intent),
+                "answer_tip": fix(q.answer_tip),
+            }
+        )
+        for q in result.expected_questions
+    ]
+    out = replace(
+        result,
+        key_message=fix(result.key_message),
+        issues=issues,
+        slide_coverage=coverage,
+        expected_questions=questions,
+    )
+    if left:
         # 글 내용은 남기지 않는다(대본 인용이 섞일 수 있음).
-        logger.warning("content: %d text field(s) not in 해요체", n)
+        logger.warning("content: %d sentence(s) left not in 해요체", left)
+    return out
 
 
 def _empty_result(data: ContentInput) -> ContentAnalysis:
@@ -640,7 +667,7 @@ def analyze_content(data: ContentInput, client: LlmClient, settings: Settings) -
             continue
         if result.dropped_items:
             logger.info("content: dropped %d invalid item(s)", result.dropped_items)
-        _warn_formal(result)
+        result = _haeyo(result)
         usage = LlmUsage(
             model=model,
             attempts=attempt,

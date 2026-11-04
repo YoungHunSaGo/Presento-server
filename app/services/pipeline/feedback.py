@@ -54,7 +54,7 @@ from app.schemas.report import (
 )
 from app.services.pipeline import llm
 from app.services.pipeline.content import ContentAnalysis, IssueType, build_transcript_block
-from app.services.pipeline.korean_style import count_formal
+from app.services.pipeline.korean_style import to_haeyo
 from app.services.pipeline.llm import LlmClient
 from app.services.pipeline.nonverbal import NonverbalAnalysis
 from app.services.pipeline.speech_metrics import SpeechAnalysis
@@ -509,9 +509,10 @@ _LENGTH_KEYS = {"awaySec", "noneSec", "silenceSec"}
 
 
 def _clip(c: Candidate, duration: float) -> Candidate | None:
+    limit = round(duration, 2)  # 리포트 durationSec과 같은 값(시간은 모두 소수 둘째 자리)
     start = max(0.0, round(c.start, 2))
-    end = min(duration, round(c.end, 2))
-    if start >= duration or end <= start:
+    end = min(limit, round(c.end, 2))
+    if start >= limit or end <= start:
         return None
     if (start, end) == (c.start, c.end):
         return c
@@ -958,16 +959,43 @@ def _parse(response: Any) -> _LlmFeedback:
         raise _Invalid(f"schema violation: {type(e).__name__}") from None
 
 
-def _warn_formal(o: _Outcome) -> None:
-    texts: list[str | None] = []
-    for f in o.feedbacks:
-        texts += [f.title, f.description, f.suggestion]
-    if o.overall:
-        texts += [o.overall.summary, *o.overall.strengths, *o.overall.improvements]
-    texts += [s.improved for s in o.improved] + [s.reason for s in o.improved]
-    n = count_formal(texts)
-    if n:
-        logger.warning("feedback: %d text field(s) not in 해요체", n)
+def _haeyo(o: _Outcome) -> _Outcome:
+    """화면 문구 끝의 합쇼체를 해요체로 바꾸고, 못 바꾼 것만 경고한다(재시도 없음).
+
+    improvedScripts.improved는 발표자가 말할 대본이라 발표 말투(합쇼체)가 자연스럽다.
+    바꾸지도, 경고하지도 않는다(reason은 화면 문구라 바꾼다).
+    """
+    left = 0
+
+    def fix(text: str) -> str:
+        nonlocal left
+        out, n = to_haeyo(text)
+        left += n
+        return out or text
+
+    feedbacks = [
+        f.model_copy(
+            update={
+                "title": fix(f.title),
+                "description": fix(f.description),
+                "suggestion": fix(f.suggestion),
+            }
+        )
+        for f in o.feedbacks
+    ]
+    overall = (
+        OverallText(
+            summary=fix(o.overall.summary),
+            strengths=[fix(t) for t in o.overall.strengths],
+            improvements=[fix(t) for t in o.overall.improvements],
+        )
+        if o.overall
+        else None
+    )
+    improved = [s.model_copy(update={"reason": fix(s.reason)}) for s in o.improved]
+    if left:
+        logger.warning("feedback: %d sentence(s) left not in 해요체", left)
+    return replace(o, feedbacks=feedbacks, overall=overall, improved=improved)
 
 
 def _retry_note(problems: set[str]) -> str:
@@ -1155,7 +1183,7 @@ def generate_feedback(data: FeedbackInput, client: LlmClient, settings: Settings
         raise FeedbackServiceError(f"no usable response after {attempts} attempts: {last_problem}")
     if best.dropped:
         logger.info("feedback: dropped %d invalid item(s)", best.dropped)
-    _warn_formal(best)
+    best = _haeyo(best)
     overall, used_fallback = _complete_overall(
         best.overall, fallback_overall(data.category_scores, best.feedbacks, cands)
     )

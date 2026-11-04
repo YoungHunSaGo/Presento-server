@@ -719,14 +719,21 @@ def test_missing_model_is_error(settings):
         generate_feedback(rich_input(), FakeLlm(resp(payload())), settings)
 
 
-def test_cost_log_and_formal_warning(llm_settings, caplog):
+def test_cost_log_and_haeyo_conversion(llm_settings, caplog):
     p = payload()
     p["feedbacks"][2]["suggestion"] = "근거를 먼저 말하십시오."
+    p["feedbacks"][0]["title"] = "도입부 말이 빠릅니다"
+    p["overall"]["summary"] = "핵심이 분명합니다. 근거를 보완하면 좋습니다."
+    p["improvedScripts"][0]["reason"] = "근거를 붙였습니다."
     with caplog.at_level(logging.INFO):
-        generate_feedback(rich_input(), FakeLlm(resp(p)), llm_settings)
+        r = generate_feedback(rich_input(), FakeLlm(resp(p)), llm_settings)
     assert "feedback llm call: model=gpt-5-mini" in caplog.text
     assert "est_cost_usd=0.00375" in caplog.text  # 3000×0.25/1M + 1500×2.0/1M
-    assert "1 text field(s) not in 해요체" in caplog.text
+    assert r.feedbacks[2].suggestion == "근거를 먼저 말하세요."
+    assert r.feedbacks[0].title == "도입부 말이 빨라요"
+    assert r.overall.summary == "핵심이 분명해요. 근거를 보완하면 좋아요."
+    assert r.improved_scripts[0].reason == "근거를 붙였어요."
+    assert "해요체" not in caplog.text
     assert llm_settings.openai_api_key.get_secret_value() not in caplog.text
     assert "문장 8 내용이에요" not in caplog.text
 
@@ -948,3 +955,26 @@ def test_prompt_v2_count_wording_rule():
     prompt = fb.load_system_prompt()
     assert fb.PROMPT_VERSION == "v2"
     assert "'여러 번'" in prompt.replace('"', "'") and "'한 번 더'" in prompt.replace('"', "'")
+
+
+def test_improved_script_keeps_presentation_style(llm_settings, caplog):
+    # 발표자가 말할 개선 대본은 합쇼체가 자연스러우므로 바꾸지도 경고하지도 않는다
+    p = payload()
+    p["improvedScripts"] = [
+        {
+            "segmentId": "s-008",
+            "improved": "들어주셔서 감사합니다.",
+            "reason": "마무리를 다듬었어요.",
+        }
+    ]
+    with caplog.at_level(logging.WARNING):
+        r = generate_feedback(rich_input(), FakeLlm(resp(p)), llm_settings)
+    assert r.improved_scripts[0].improved == "들어주셔서 감사합니다."
+    assert "해요체" not in caplog.text
+
+
+def test_clipped_end_is_rounded_to_two_decimals():
+    # 영상 길이 44.517656초를 넘는 말 속도 구간(30~60초) → 끝은 44.52
+    pace = [PacePoint(t=0, value=320), PacePoint(t=30, value=240)]
+    (c,) = build_candidates(data(speech=speech(pace=pace), duration_sec=44.517656))
+    assert (c.start, c.end) == (30.0, 44.52)

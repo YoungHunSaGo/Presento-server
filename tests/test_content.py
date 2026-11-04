@@ -696,18 +696,32 @@ def test_schema_name_follows_prompt_version(llm_settings):
     assert client.calls[0]["text"]["format"]["name"] == "content_analysis_v2"
 
 
-def test_formal_endings_logged_as_warning_without_retry(llm_settings, caplog):
+def test_formal_endings_are_converted_to_haeyo_without_retry(llm_settings, caplog):
     p = good_payload(keyMessage="핵심은 열섬 완화입니다.")
     p["issues"][0]["reason"] = "순서가 뒤바뀌었습니다."
-    p["expectedQuestions"][0]["answerTip"] = "사례를 드십시오. 출처도 밝히십시오."  # 합쇼체 명령형
+    p["expectedQuestions"][0]["question"] = "무엇이 다릅니까?"
+    p["expectedQuestions"][0]["answerTip"] = "사례를 드십시오. 출처도 밝히십시오."
+    p["slides"] = [{"page": 1, "covered": False, "note": "비교 표를 설명하지 않았습니다."}]
     client = FakeLlm(response(p))
     with caplog.at_level(logging.WARNING):
-        r = run(client, settings=llm_settings)
+        r = run(client, settings=llm_settings, slides=["비교 표"])
     assert len(client.calls) == 1
-    assert r.key_message == "핵심은 열섬 완화입니다."  # 버리지 않는다
+    assert r.key_message == "핵심은 열섬 완화예요."
+    assert r.issues[0].reason == "순서가 뒤바뀌었어요."
+    assert r.expected_questions[0].question == "무엇이 다르나요?"
+    assert r.expected_questions[0].answer_tip == "사례를 드세요. 출처도 밝히세요."
+    assert r.slide_coverage[0].note == "비교 표를 설명하지 않았어요."
+    assert "해요체" not in caplog.text  # 다 바꿨으므로 경고 없음
+
+
+def test_unconvertible_ending_is_kept_and_warned(llm_settings, caplog):
+    p = good_payload(keyMessage="그건 아니니다.")  # 활용을 알 수 없는 끝
+    with caplog.at_level(logging.WARNING):
+        r = run(FakeLlm(response(p)), settings=llm_settings)
+    assert r.key_message == "그건 아니니다."
     warn = [rec for rec in caplog.records if "해요체" in rec.getMessage()]
-    assert len(warn) == 1 and "3 text field(s)" in warn[0].getMessage()
-    assert "열섬" not in caplog.text  # 글 내용은 로그에 남기지 않음
+    assert len(warn) == 1 and "1 sentence(s)" in warn[0].getMessage()
+    assert "그건" not in caplog.text  # 글 내용은 로그에 남기지 않음
 
 
 def test_haeyo_output_has_no_warning(llm_settings, caplog):

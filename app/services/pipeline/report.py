@@ -6,6 +6,7 @@
 P2·P3·P7이 쓰는 요약값(overallScore, scores, fillerCount, syllablesPerMin)은 이 JSON에서 꺼낸다.
 """
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -118,8 +119,37 @@ def _check_invariants(r: ReportResponse) -> None:
     for v in (nv.gaze_front_ratio, nv.posture_stability):
         if v is not None and not 0 <= v <= 1:
             problems.append("nonverbal ratio")
+    problems += [f"{path} not 2 decimals" for path, v in _time_values(r) if not _two_decimals(v)]
     if problems:
         raise ReportInvalid("report invariants failed: " + ", ".join(problems))
+
+
+def _two_decimals(v: float) -> bool:
+    if not math.isfinite(v):
+        return False
+    return abs(v * 100 - round(v * 100)) < 1e-6
+
+
+def _time_values(r: ReportResponse) -> list[tuple[str, float]]:
+    """리포트의 모든 시간 값(초)과 위치."""
+    out: list[tuple[str, float]] = [("durationSec", r.duration_sec)]
+    sp = r.metrics.speech
+    out += [("longestSilenceSec", sp.longest_silence_sec), ("overTimeSec", sp.over_time_sec)]
+    for i, rg in enumerate(r.metrics.nonverbal.low_confidence_ranges):
+        out += [
+            (f"lowConfidenceRanges[{i}].start", rg.start),
+            (f"lowConfidenceRanges[{i}].end", rg.end),
+        ]
+    for f in r.feedbacks:
+        out += [(f"feedbacks.{f.id}.start", f.start), (f"feedbacks.{f.id}.end", f.end)]
+    for seg in r.transcript.segments:
+        out += [(f"{seg.id}.start", seg.start), (f"{seg.id}.end", seg.end)]
+        for j, w in enumerate(seg.words):
+            out += [(f"{seg.id}.words[{j}].start", w.start), (f"{seg.id}.words[{j}].end", w.end)]
+    for s in r.improved_scripts:
+        out += [(f"improvedScripts.{s.segment_id}.start", s.start)]
+        out += [(f"improvedScripts.{s.segment_id}.end", s.end)]
+    return out
 
 
 def history_values(data: dict[str, Any]) -> dict[str, Any]:

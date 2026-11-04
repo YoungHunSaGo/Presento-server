@@ -203,3 +203,28 @@ def test_history_values():
         "filler_count": 9,
         "syllables_per_min": 341,
     }
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d: d["feedbacks"][0].update(end=44.517656),
+        lambda d: d.update(durationSec=287.401),
+        lambda d: d["transcript"]["segments"][0]["words"][0].update(start=0.123),
+        lambda d: d["improvedScripts"][0].update(end=108.001),
+        lambda d: d["metrics"]["nonverbal"]["lowConfidenceRanges"][0].update(end=128.555),
+    ],
+)
+def test_time_values_must_have_two_decimals(mutate):
+    data = copy.deepcopy(SPEC)
+    mutate(data)
+    with pytest.raises(rp.ReportInvalid) as exc_info:
+        rp.validate_report(data)
+    assert "2 decimals" in str(exc_info.value)
+
+
+def test_infinite_time_value_is_invalid_not_crash():
+    data = copy.deepcopy(SPEC)
+    data["feedbacks"][0]["end"] = float("inf")
+    with pytest.raises(rp.ReportInvalid):
+        rp.validate_report(data)
