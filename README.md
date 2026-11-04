@@ -155,8 +155,8 @@ AWS 대신 집 서버(RTX 3090, 같은 서버에서 HowMuch·Anima도 돎)에 �
 ```bash
 # 서버에 Docker(compose 플러그인 포함)와 Tailscale이 있어야 한다
 tailscale ip -4                       # 서버의 Tailscale 주소 확인. 예: 100.101.102.103
-git clone https://github.com/YoungHunSaGo/Presento-server.git ~/Presento-server
-cd ~/Presento-server
+git clone https://github.com/YoungHunSaGo/Presento-server.git ~/dev/Presento-server
+cd ~/dev/Presento-server
 cp .env.home.example .env.home && chmod 600 .env.home
 nano .env.home                        # 아래 값 채우기
 bash deploy/home-update.sh --no-pull  # 빌드·마이그레이션·실행(첫 빌드는 10분 안팎)
@@ -186,7 +186,7 @@ sudo sysctl --system
 ### 갱신
 
 ```bash
-cd ~/Presento-server && bash deploy/home-update.sh
+cd ~/dev/Presento-server && bash deploy/home-update.sh
 ```
 
 진행 중인 분석이 있으면 워커는 그 분석이 끝날 때까지(최대 17분) 기다렸다가 새 버전으로 바뀐다.
@@ -196,7 +196,7 @@ cd ~/Presento-server && bash deploy/home-update.sh
 ### 로그 확인
 
 ```bash
-cd ~/Presento-server
+cd ~/dev/Presento-server
 alias pc='docker compose -f docker-compose.home.yml --env-file .env.home'
 pc ps
 pc logs -f --tail 100 worker          # 분석 진행 상황

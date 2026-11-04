@@ -21,7 +21,6 @@ x-logging: &logging
     max-file: "3"
 
 x-app: &app
-  build: .
   image: presento-server:home
   env_file: .env.home
   environment:
@@ -39,11 +38,16 @@ x-app: &app
 services:
   api:
     <<: *app
+    build:
+      context: .
+      labels:
+        com.docker.compose.project: presento-home
     # 마이그레이션은 deploy/home-update.sh가 재시작 전에 따로 적용한다.
     command: ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${API_PORT:-8000}:8000"
     mem_limit: 768m
+    memswap_limit: 768m
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
       interval: 15s
@@ -59,6 +63,7 @@ services:
 
   worker:
     <<: *app
+    pull_policy: never
     # 분석(FFmpeg + MediaPipe)은 한 번에 하나만. 작업 10개마다 프로세스를 새로 띄워 메모리가
     # 쌓이지 않게 한다.
     command: ["celery", "-A", "app.workers.celery_app", "worker", "-l", "info",
@@ -66,6 +71,7 @@ services:
     # 메모리가 넘치면 서버 전체가 아니라 워커만 죽는다. 죽은 작업은 task_reject_on_worker_lost로
     # 큐에 돌아간다.
     mem_limit: 1500m
+    memswap_limit: 1500m
     # 갱신(재시작) 때 진행 중인 분석이 끝날 때까지 기다린다(task_time_limit 16분 + 여유).
     stop_grace_period: 17m
     depends_on:
@@ -85,6 +91,7 @@ services:
     restart: unless-stopped
     logging: *logging
     mem_limit: 512m
+    memswap_limit: 512m
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -102,6 +109,7 @@ services:
     restart: unless-stopped
     logging: *logging
     mem_limit: 128m
+    memswap_limit: 128m
     volumes:
       - redisdata:/data
     healthcheck:
@@ -127,6 +135,7 @@ services:
     restart: unless-stopped
     logging: *logging
     mem_limit: 512m
+    memswap_limit: 512m
     volumes:
       - miniodata:/data
     healthcheck:
@@ -151,6 +160,12 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
+        case "$$S3_BUCKET" in
+          ""|*[!a-z0-9.-]*|[-.]*|*[-.])
+            echo "invalid S3_BUCKET: $$S3_BUCKET" >&2
+            exit 1
+            ;;
+        esac
         mc mb --ignore-existing "local/$$S3_BUCKET"
         cat > /tmp/presento-app.json <<POLICY
         {"Version": "2012-10-17", "Statement": [
@@ -162,11 +177,13 @@ services:
         mc admin policy create local presento-app /tmp/presento-app.json >/dev/null
         mc admin user add local "$$APP_USER" "$$APP_PASSWORD" >/dev/null
         mc admin policy attach local presento-app --user "$$APP_USER" >/dev/null 2>&1 \
-          || mc admin policy entities local --user "$$APP_USER" | grep -q presento-app
+          || mc admin policy entities local --user "$$APP_USER" | grep -q presento-app \
+          || { echo "failed to attach presento-app policy to $$APP_USER" >&2; exit 1; }
         echo "bucket and app user ready"
     restart: on-failure:5
     logging: *logging
     mem_limit: 128m
+    memswap_limit: 128m
 
 volumes:
   pgdata:

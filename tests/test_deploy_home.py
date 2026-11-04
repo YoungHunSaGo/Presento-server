@@ -1,6 +1,7 @@
 """집 서버 배포 파일 점검(서버·Docker 호출 없음): docker-compose.home.yml, .env.home.example,
 deploy/home-update.sh."""
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -10,6 +11,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPOSE = ROOT / "docker-compose.home.yml"
+DOCKERFILE = ROOT / "Dockerfile"
 SCRIPT = ROOT / "deploy" / "home-update.sh"
 
 MEM_LIMITS = {
@@ -20,6 +22,7 @@ MEM_LIMITS = {
     "minio": "512m",
 }
 LONG_RUNNING = set(MEM_LIMITS)
+ALL_MEM_LIMITS = {**MEM_LIMITS, "minio-init": "128m"}
 
 
 @pytest.fixture(scope="module")
@@ -58,8 +61,21 @@ def test_log_rotation(home):
 
 
 def test_memory_limits(home):
-    for name, limit in MEM_LIMITS.items():
+    for name, limit in ALL_MEM_LIMITS.items():
         assert home["services"][name]["mem_limit"] == limit, name
+        assert home["services"][name]["memswap_limit"] == limit, name
+
+
+def test_image_build_label_and_single_build_definition(home):
+    # docker image prune --filter label=com.docker.compose.project=presento-home가 작동하려면
+    # 빌드된 이미지 자체에 해당 라벨이 있어야 한다.
+    api_build = home["services"]["api"]["build"]
+    assert api_build["labels"]["com.docker.compose.project"] == "presento-home"
+    assert 'LABEL com.docker.compose.project="presento-home"' in DOCKERFILE.read_text()
+    # worker는 api가 빌드한 같은 이미지를 재사용한다(중복 빌드 방지).
+    assert "build" not in home["services"]["worker"]
+    assert home["services"]["worker"]["image"] == home["services"]["api"]["image"]
+    assert home["services"]["worker"]["pull_policy"] == "never"
 
 
 def test_no_gpu_reservation(home):
@@ -143,11 +159,14 @@ def test_home_update_script():
     order = [
         text.index("git pull --ff-only"),
         text.index("dc build"),
+        text.index("dc run --rm minio-init"),
         text.index("alembic upgrade head"),
         text.index("dc up -d --remove-orphans"),
         text.index("== 상태 확인 =="),  # 이 뒤에서 /api/v1/health를 확인
     ]
     assert "/api/v1/health" in text[text.index("== 상태 확인 ==") :]
+    assert "/minio/health/live" in text[text.index("== 호스트 포트 확인 ==") :]
+    assert "dc up -d --remove-orphans || true" not in text  # 기동 실패를 삼키지 않는다
     assert order == sorted(order)
     assert 'exec bash "$SELF" --no-pull' in text  # pull 뒤 새 스크립트로
     assert "docker-compose.home.yml" in text and "docker-compose.prod.yml" not in text
@@ -161,9 +180,11 @@ def test_app_uses_dedicated_minio_account_not_root(home):
         assert "MINIO_ROOT" not in str(env)
     init = home["services"]["minio-init"]
     script = init["command"][0]
-    # 버킷 한정 정책을 만들어 앱 계정에 붙인다
+    # 버킷 이름 형식을 먼저 검증하고 버킷 한정 정책을 만들어 앱 계정에 붙인다
+    assert "invalid S3_BUCKET" in script
     assert "arn:aws:s3:::$$S3_BUCKET/*" in script
     assert "mc admin user add" in script and "mc admin policy attach" in script
+    assert "failed to attach presento-app policy" in script
     # 관리자 비밀번호는 명령 인자가 아니라 환경 변수(MC_HOST_*)로
     assert "MINIO_ROOT_PASSWORD" not in script
     assert init["environment"]["MC_HOST_local"].startswith("http://${MINIO_ROOT_USER:?")
@@ -183,8 +204,90 @@ def test_home_update_checks_worker_and_scopes_cleanup():
     text = SCRIPT.read_text()
     assert "inspect ping" in text  # 워커가 살아 있는지
     assert "curl -fsS" in text  # 호스트 포트로도 접속되는지
+    assert "urllib.request.urlopen" in text  # curl이 없을 때 폴백
     # 같은 서버의 다른 서비스 이미지·빌드 캐시는 지우지 않는다
     prunes = [ln for ln in text.splitlines() if "prune" in ln and not ln.lstrip().startswith("#")]
     assert prunes == [
         "docker image prune -f --filter label=com.docker.compose.project=presento-home >/dev/null"
     ]
+
+
+def _write_env_home(tmp_path: Path, **overrides: str) -> Path:
+    work = tmp_path / "repo"
+    deploy_dir = work / "deploy"
+    deploy_dir.mkdir(parents=True, exist_ok=True)
+    script_copy = deploy_dir / "home-update.sh"
+    script_copy.write_text(SCRIPT.read_text())
+    script_copy.chmod(0o755)
+
+    base = {
+        "BIND_ADDR": "127.0.0.1",
+        "API_PORT": "8000",
+        "MINIO_PORT": "9000",
+        "S3_PUBLIC_ENDPOINT_URL": "http://127.0.0.1:9000",
+        "S3_BUCKET": "presento",
+        "MINIO_ROOT_USER": "presento-admin",
+        "MINIO_ROOT_PASSWORD": "rootpassword1234567890",
+        "MINIO_APP_USER": "presento-app",
+        "MINIO_APP_PASSWORD": "apppassword1234567890",
+        "POSTGRES_PASSWORD": "pgpassword1234567890",
+        "JWT_SECRET": "x" * 32,
+        "OPENAI_API_KEY": "sk-test-placeholder-value",
+        "CORS_ORIGINS": "http://localhost:5173",
+    }
+    base.update(overrides)
+    lines = [f"{k}={v}" for k, v in base.items()]
+    (work / ".env.home").write_text("\n".join(lines) + "\n")
+    return script_copy
+
+
+def test_home_update_rejects_unknown_cli_arg(tmp_path):
+    script_copy = _write_env_home(tmp_path)
+    res = subprocess.run(  # noqa: S603
+        ["bash", str(script_copy), "--unknown-flag"],  # noqa: S607
+        cwd=script_copy.parent.parent,
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 2
+    assert "사용법" in res.stderr
+
+
+@pytest.mark.parametrize(
+    "bad_bind",
+    ["0.0.0.0", '"0.0.0.0"', "0.0.0.0 # comment", "::", "*"],  # noqa: S104
+)
+def test_home_update_rejects_wildcard_bind_addr(tmp_path, bad_bind):
+    script_copy = _write_env_home(tmp_path, BIND_ADDR=bad_bind)
+    res = subprocess.run(  # noqa: S603
+        ["bash", str(script_copy), "--no-pull"],  # noqa: S607
+        cwd=script_copy.parent.parent,
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 1
+    assert "BIND_ADDR" in res.stderr
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_msg"),
+    [
+        ({"OPENAI_API_KEY": "# comment only"}, "OPENAI_API_KEY가 비어 있어요"),
+        ({"OPENAI_API_KEY": '"" # empty quoted'}, "OPENAI_API_KEY가 비어 있어요"),
+        ({"JWT_SECRET": "too-short"}, "JWT_SECRET은 32자 이상"),
+        ({"POSTGRES_PASSWORD": "bad/password@url"}, "POSTGRES_PASSWORD에는 영문·숫자만"),
+        ({"MINIO_ROOT_PASSWORD": "bad:password"}, "MINIO_ROOT_PASSWORD에는 영문·숫자만"),
+        ({"S3_BUCKET": 'bad"bucket'}, "S3_BUCKET 형식이 올바르지 않아요"),
+    ],
+)
+def test_home_update_validates_env_values(tmp_path, overrides, expected_msg):
+    script_copy = _write_env_home(tmp_path, **overrides)
+    res = subprocess.run(  # noqa: S603
+        ["bash", str(script_copy), "--no-pull"],  # noqa: S607
+        cwd=script_copy.parent.parent,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": "/usr/bin:/bin"},
+    )
+    assert res.returncode == 1
+    assert expected_msg in res.stderr
