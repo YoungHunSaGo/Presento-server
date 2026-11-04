@@ -185,6 +185,7 @@ def test_app_uses_dedicated_minio_account_not_root(home):
     assert "arn:aws:s3:::$$S3_BUCKET/*" in script
     assert "mc admin user add" in script and "mc admin policy attach" in script
     assert "failed to attach presento-app policy" in script
+    assert "grep" not in script  # Chainguard MinIO 이미지에는 grep이 없다
     # 관리자 비밀번호는 명령 인자가 아니라 환경 변수(MC_HOST_*)로
     assert "MINIO_ROOT_PASSWORD" not in script
     assert init["environment"]["MC_HOST_local"].startswith("http://${MINIO_ROOT_USER:?")

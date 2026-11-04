@@ -176,9 +176,12 @@ services:
         POLICY
         mc admin policy create local presento-app /tmp/presento-app.json >/dev/null
         mc admin user add local "$$APP_USER" "$$APP_PASSWORD" >/dev/null
-        mc admin policy attach local presento-app --user "$$APP_USER" >/dev/null 2>&1 \
-          || mc admin policy entities local --user "$$APP_USER" | grep -q presento-app \
-          || { echo "failed to attach presento-app policy to $$APP_USER" >&2; exit 1; }
+        if ! mc admin policy attach local presento-app --user "$$APP_USER" >/dev/null 2>&1; then
+          case "$$(mc admin policy entities local --user "$$APP_USER")" in
+            *presento-app*) ;;
+            *) echo "failed to attach presento-app policy to $$APP_USER" >&2; exit 1 ;;
+          esac
+        fi
         echo "bucket and app user ready"
     restart: on-failure:5
     logging: *logging
