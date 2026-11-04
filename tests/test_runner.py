@@ -18,7 +18,12 @@ from app.services.pipeline.content import (
     ContentServiceError,
     IssueType,
 )
-from app.services.pipeline.feedback import FeedbackResult, FeedbackServiceError, fallback_overall
+from app.services.pipeline.feedback import (
+    FeedbackResult,
+    FeedbackServiceError,
+    build_candidates,
+    fallback_overall,
+)
 from app.services.pipeline.nonverbal import FrameObs, NonverbalUnavailable, PoseObs
 from app.services.pipeline.report import validate_report
 from app.services.pipeline.stt import NoSpeechDetected, SttServiceError, normalize
@@ -101,7 +106,7 @@ class Steps:
             feedbacks=[fb],
             overall=fallback_overall(data.category_scores, [fb]),
             improved_scripts=[],
-            candidates=[],
+            candidates=build_candidates(data),  # 실제와 같이 그때의 후보를 담는다
         )
 
 

@@ -19,6 +19,7 @@ from app.models.base import Base, new_id, utcnow
 from app.models.enums import AnalysisStatus
 
 if TYPE_CHECKING:
+    from app.models.artifact import AnalysisArtifact
     from app.models.presentation import Presentation
     from app.models.report import Report
 
@@ -65,6 +66,13 @@ class Analysis(Base):
 
     presentation: Mapped[Presentation] = relationship(back_populates="analyses")
     report: Mapped[Report | None] = relationship(
+        back_populates="analysis",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
+    )
+    # 파이프라인 중간 결과(사용자 대본 포함). 회차와 함께 지운다.
+    artifact: Mapped[AnalysisArtifact | None] = relationship(
         back_populates="analysis",
         cascade="all, delete-orphan",
         passive_deletes=True,

@@ -3,6 +3,7 @@
 모든 상태 변경은 조건부 UPDATE다. 회차가 지워졌거나 다른 워커가 가져갔으면 Cancelled로 멈춘다.
 """
 
+import json
 from datetime import datetime
 from typing import Any
 
@@ -10,11 +11,16 @@ from sqlalchemy import or_, update
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
-from app.models import Analysis, AnalysisStage, AnalysisStatus, Report
+from app.models import Analysis, AnalysisArtifact, AnalysisStage, AnalysisStatus, Report
 from app.services.analysis_state import STALE_PROCESSING
 from app.services.media import MediaError, ProbeDuration, ProbeUnavailable
 from app.services.pipeline.report import history_values
 from app.services.storage import Storage
+
+
+def json_size(data: dict[str, Any]) -> int:
+    return len(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+
 
 # N3 error.message (사용자에게 보이는 해요체)
 FAILURE_MESSAGES = {
@@ -112,9 +118,13 @@ def complete(
     report: dict[str, Any],
     duration: float,
     now: datetime,
+    artifacts: dict[str, Any] | None = None,
     **extra: Any,
 ) -> None:
-    """리포트 저장 + 회차 요약값(P2·P3·P7) 갱신. extra는 Analysis 컬럼(해시 등)."""
+    """리포트 저장 + 회차 요약값(P2·P3·P7) 갱신. extra는 Analysis 컬럼(해시 등).
+
+    artifacts(중간 결과)가 있으면 같은 트랜잭션에 함께 저장한다.
+    """
     result = db.execute(
         update(Analysis)
         .where(Analysis.id == analysis.id, Analysis.status == AnalysisStatus.PROCESSING)
@@ -132,4 +142,10 @@ def complete(
         db.rollback()
         raise Cancelled
     db.add(Report(analysis_id=analysis.id, data=report))
+    if artifacts is not None:
+        db.add(
+            AnalysisArtifact(
+                analysis_id=analysis.id, data=artifacts, size_bytes=json_size(artifacts)
+            )
+        )
     db.commit()

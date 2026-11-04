@@ -54,6 +54,9 @@ app/
       feedback.py          # LLM 피드백 생성 + 스키마 검증 + 근거 대조 + 재시도
       scoring.py           # 항목별 점수, 목적별 가중치로 종합 점수
       report.py            # 최종 리포트 JSON 조립
+      artifacts.py         # 회차별 중간 결과 저장·재계산(LLM 없이 scoring·report 다시)
+  tools/
+    recompute.py           # python -m app.tools.recompute: 중간 결과로 점수·리포트 재계산
   workers/
     celery_app.py
     tasks.py               # run_analysis(analysis_id): stage/progress 갱신하며 파이프라인 실행
@@ -79,6 +82,7 @@ docs/
 - 외부 AI 호출 실패는 `AI_SERVICE_ERROR`로 분석을 `FAILED` 처리한다. 목소리가 없으면 `NO_SPEECH_DETECTED`, 얼굴이 거의 없으면 `NO_FACE_DETECTED`.
 - 영상 10분 초과는 `VIDEO_TOO_LONG`. whisper 업로드 25MB 제한을 넘지 않게 음성은 모노 16kHz로 변환해 보낸다.
 - 같은 영상 해시의 결과는 재사용해 API를 다시 호출하지 않는다.
+- **평가와 시연은 Docker 안에서만 실행한다.** 같은 영상이라도 ffmpeg 버전(YUV→RGB 색 변환)과 MediaPipe 플랫폼 빌드(macOS/Linux)에 따라 랜드마크가 달라져 제스처 같은 지표가 바뀐다(실측: 같은 영상에서 분당 제스처 Docker 8.57 / Mac 13.33). 로컬(Mac) 실행 결과는 점수 비교에 쓰지 않는다.
 
 ## 4. 작업 순서 (마일스톤)
 

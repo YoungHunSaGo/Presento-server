@@ -1,4 +1,5 @@
 from app.models.analysis import Analysis
+from app.models.artifact import AnalysisArtifact
 from app.models.base import Base
 from app.models.enums import (
     STAGE_PROGRESS,
@@ -16,6 +17,7 @@ from app.models.user import User
 __all__ = [
     "STAGE_PROGRESS",
     "Analysis",
+    "AnalysisArtifact",
     "AnalysisStage",
     "AnalysisStatus",
     "AnalysisUsage",

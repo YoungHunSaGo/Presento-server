@@ -32,6 +32,7 @@ STALE_WORKDIR_SEC보다 오래된 임시 폴더를 지운다.
 
 import copy
 import hashlib
+import json
 import logging
 import shutil
 import tempfile
@@ -48,12 +49,20 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
-from app.models import Analysis, AnalysisStage, AnalysisStatus, Presentation, Report
+from app.models import (
+    Analysis,
+    AnalysisArtifact,
+    AnalysisStage,
+    AnalysisStatus,
+    Presentation,
+    Report,
+)
 from app.models.enums import Purpose
 from app.schemas.common import to_kst_iso
 from app.schemas.report import Segment, Transcript, Word
 from app.services.media import MediaError, ProbeDuration
 from app.services.pipeline import audio, content, feedback, nonverbal, stt
+from app.services.pipeline.artifacts import build_artifacts
 from app.services.pipeline.content import ContentInput, ContentServiceError
 from app.services.pipeline.feedback import FeedbackInput, FeedbackServiceError
 from app.services.pipeline.lifecycle import (
@@ -77,7 +86,7 @@ from app.services.storage import Storage, StorageError
 logger = logging.getLogger(__name__)
 
 # 알고리즘·프롬프트·기준값을 바꾸면 올린다. 바뀐 버전의 결과는 재사용하지 않는다.
-PIPELINE_VERSION = "2"  # 2: 얼굴을 머리 영역 잘라 찾기, Pose 고개 방향 추정
+PIPELINE_VERSION = "3"  # 2: 얼굴 머리 영역 자르기, 3: stt 프롬프트 v2
 FRAME_FPS = 1.0
 _HASH_CHUNK = 1024 * 1024
 WORKDIR_PREFIX = "presento-"
@@ -283,11 +292,14 @@ def _execute(
     }
 
     same = _previous(db, p.user_id, aid, cache_key=cache_key) if cache_key else None
+    same_art = db.get(AnalysisArtifact, same.analysis_id) if same is not None else None
+    same_art_data = copy.deepcopy(same_art.data) if same_art is not None else None
     db.commit()  # 읽기 트랜잭션을 길게 열어 두지 않는다
     reused = _try_rebase(same.data, analysis) if same is not None else None
     if reused is not None:
         logger.info("Analysis %s reuses a previous report (same video and settings)", aid)
-        complete(db, analysis, reused, duration, deps.now(), **extra)
+        # 중간 결과도 함께 복사해 이 회차도 재계산할 수 있게 한다(원본 회차를 지워도 남는다).
+        complete(db, analysis, reused, duration, deps.now(), artifacts=same_art_data, **extra)
         return
     set_progress(db, aid, AnalysisStage.EXTRACTING_AUDIO, 5)
 
@@ -374,7 +386,31 @@ def _execute(
             feedback=fb,
         )
     )
-    complete(db, analysis, report, duration, deps.now(), **extra)
+    artifacts = build_artifacts(
+        pipeline_version=PIPELINE_VERSION,
+        purpose=purpose,
+        duration_sec=duration,
+        time_limit_sec=p.time_limit_sec,
+        transcript=transcript,
+        speech_metrics=speech.metrics.model_dump(mode="json", by_alias=True),
+        frames=obs,
+        content=ct,
+        feedback=fb,
+    )
+    complete(db, analysis, report, duration, deps.now(), artifacts=_storable(artifacts), **extra)
+
+
+def _storable(artifacts: dict[str, Any]) -> dict[str, Any] | None:
+    """JSON으로 저장할 수 없는 값(numpy 스칼라·NaN 등)이 있으면 중간 결과는 저장하지 않는다.
+
+    중간 결과는 재계산용 부가 데이터라, 이 때문에 이미 비용을 쓴 분석을 실패시키지 않는다.
+    """
+    try:
+        json.dumps(artifacts, allow_nan=False)
+    except (TypeError, ValueError) as e:
+        logger.warning("artifacts not storable (%s); skipping", type(e).__name__)
+        return None
+    return artifacts
 
 
 def run_pipeline(

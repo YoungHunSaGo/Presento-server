@@ -155,6 +155,7 @@ class ContentAnalysis:
     # LLM이 판단을 빠뜨린 페이지, 페이지 상한(MAX_SLIDE_PAGES)으로 보내지 않은 페이지가 있는지
     slides_missing_pages: list[int] = field(default_factory=list)
     slides_truncated: bool = False
+    raw: dict[str, Any] | None = None  # 채택한 LLM 응답 원본(중간 결과 저장·재계산용)
 
 
 @dataclass(frozen=True)
@@ -653,7 +654,8 @@ def analyze_content(data: ContentInput, client: LlmClient, settings: Settings) -
         total_in += inp
         total_out += out
         try:
-            result = _postprocess(_parse(response), data, sent_ids)
+            parsed = _parse(response)
+            result = _postprocess(parsed, data, sent_ids)
         except _TokenLimit:
             if kwargs["max_output_tokens"] >= MAX_OUTPUT_TOKENS_RETRY:
                 raise ContentServiceError("llm output hit token limit twice") from None
@@ -686,6 +688,7 @@ def analyze_content(data: ContentInput, client: LlmClient, settings: Settings) -
             dropped_items=result.dropped_items,
             slides_missing_pages=result.slides_missing_pages,
             slides_truncated=result.slides_truncated,
+            raw=parsed.model_dump(),
         )
     raise ContentServiceError(
         f"no usable response after {MAX_RETRIES + 1} attempts: {last_problem}"

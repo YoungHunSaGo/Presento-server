@@ -243,6 +243,7 @@ class FeedbackResult:
     usage: LlmUsage | None = None  # LLM을 부르지 않았으면 None
     dropped_items: int = 0
     overall_fallback: bool = False  # overall의 일부라도 코드 기본 문구를 썼는지
+    raw: dict[str, Any] | None = None  # 채택한 LLM 응답 원본(중간 결과 저장·재계산용)
 
 
 def _seg_ids_in(transcript: Transcript, start: float, end: float) -> tuple[str, ...]:
@@ -793,6 +794,7 @@ class _Outcome:
     violations: int  # 재시도 사유가 된 문제 수
     dropped: int
     problems: set[str]  # 재시도할 때 LLM에 알려 줄 규칙 이름
+    raw: dict[str, Any] | None = None  # 이 응답의 LLM 원본
 
     def score(self) -> tuple[int, int, int]:
         overall_ok = int(
@@ -1144,7 +1146,9 @@ def generate_feedback(data: FeedbackInput, client: LlmClient, settings: Settings
             inp, out = llm.log_usage("feedback", model, attempt, response, settings)
             total_in += inp
             total_out += out
-            outcome = _check(_parse(response), data, cands, sent_ids)
+            parsed = _parse(response)
+            outcome = _check(parsed, data, cands, sent_ids)
+            outcome.raw = parsed.model_dump()
         except llm.LlmCallError as e:
             error = str(e)
         except FeedbackServiceError as e:
@@ -1203,4 +1207,5 @@ def generate_feedback(data: FeedbackInput, client: LlmClient, settings: Settings
             estimated_cost_usd=round(llm.estimate_cost(settings, total_in, total_out), 6),
         ),
         dropped_items=best.dropped,
+        raw=best.raw,
     )
