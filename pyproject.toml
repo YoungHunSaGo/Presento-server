@@ -23,6 +23,7 @@ dependencies = [
     "bcrypt==5.0.0",
     "mediapipe==1.2.0",
     "openai==3.44.0",
+    "pypdf==6.21.4",
 ]
 
 [project.optional-dependencies]
@@ -36,7 +37,7 @@ dev = [
 include = ["app*"]
 
 [tool.setuptools.package-data]
-app = ["prompts/*.txt", "services/pipeline/*.json"]
+app = ["prompts/*.txt", "prompts/*.md", "services/pipeline/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

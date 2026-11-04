@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # 시간 초과 후 재시도는 이중 과금될 수 있어 재시도는 1번만.
     openai_timeout_sec: float = Field(default=180.0, gt=0, le=600)
     openai_max_retries: int = Field(default=1, ge=0, le=3)
+    # 내용 분석·피드백 LLM 예상 비용 계산용 단가(USD / 100만 토큰). 기본값은 gpt-5-mini.
+    # 모델을 바꾸면 .env로 맞춘다.
+    openai_llm_input_usd_per_1m: float = Field(default=0.25, ge=0)
+    openai_llm_output_usd_per_1m: float = Field(default=2.0, ge=0)
 
     # 인증
     jwt_secret: SecretStr
