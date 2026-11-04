@@ -676,3 +676,41 @@ def test_unreadable_pdf_returns_none(tmp_path, data):
 
 def test_missing_pdf_returns_none(tmp_path):
     assert extract_slide_texts(tmp_path / "nope.pdf") is None
+
+
+# ---------- 프롬프트 v2: 해요체, 측정 항목 제외 ----------
+
+
+def test_system_prompt_v2_rules():
+    prompt = content.load_system_prompt()
+    assert content.PROMPT_VERSION == "v2"
+    assert "해요체로 통일" in prompt and "합쇼체" in prompt
+    for word in ("추임새", "말 속도", "침묵", "시선", "자세", "제스처"):
+        assert word in prompt
+    assert "issues에 넣지 않는다" in prompt
+
+
+def test_schema_name_follows_prompt_version(llm_settings):
+    client = FakeLlm(response(good_payload()))
+    run(client, settings=llm_settings)
+    assert client.calls[0]["text"]["format"]["name"] == "content_analysis_v2"
+
+
+def test_formal_endings_logged_as_warning_without_retry(llm_settings, caplog):
+    p = good_payload(keyMessage="핵심은 열섬 완화입니다.")
+    p["issues"][0]["reason"] = "순서가 뒤바뀌었습니다."
+    p["expectedQuestions"][0]["answerTip"] = "사례를 드십시오. 출처도 밝히십시오."  # 합쇼체 명령형
+    client = FakeLlm(response(p))
+    with caplog.at_level(logging.WARNING):
+        r = run(client, settings=llm_settings)
+    assert len(client.calls) == 1
+    assert r.key_message == "핵심은 열섬 완화입니다."  # 버리지 않는다
+    warn = [rec for rec in caplog.records if "해요체" in rec.getMessage()]
+    assert len(warn) == 1 and "3 text field(s)" in warn[0].getMessage()
+    assert "열섬" not in caplog.text  # 글 내용은 로그에 남기지 않음
+
+
+def test_haeyo_output_has_no_warning(llm_settings, caplog):
+    with caplog.at_level(logging.WARNING):
+        run(FakeLlm(response(good_payload())), settings=llm_settings)
+    assert "해요체" not in caplog.text

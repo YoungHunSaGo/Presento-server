@@ -26,6 +26,9 @@ LLM은 문장 ID만 쓰고, 시간(초)은 코드가 대본에서 찾아 붙인�
 항목 단위로 버리는 경우: 없는(또는 보지 못한) 문장 ID, 너무 흩어진 문장 묶음, 숫자 검사에 걸린 글,
 없는 슬라이드 페이지. keyMessage가 숫자 검사에 걸리면 None.
 
+말투: 모든 글은 해요체. 합쇼체("~습니다/합니다")로 끝나는 문장이 있으면 경고 로그만 남긴다
+(재시도하지 않음).
+
 로그: 호출마다 모델·토큰 수·예상 비용(USD)만 남긴다. API 키와 대본·슬라이드 전문은 남기지 않는다.
 
 에러 구분: ContentServiceError → AI_SERVICE_ERROR
@@ -47,10 +50,12 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from app.core.config import Settings
 from app.models.enums import Purpose
 from app.schemas.report import ExpectedQuestion, SlideCoverage, Transcript
+from app.services.pipeline.korean_style import count_formal
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"  # 지시문(content_system_*.md)
+RUBRIC_VERSION = "v1"  # 목적별 루브릭(content_rubric_*_*.md)
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 
 # ---- 입력 상한 ----
@@ -319,7 +324,7 @@ def load_system_prompt(version: str = PROMPT_VERSION) -> str:
 
 
 @lru_cache
-def load_rubric(purpose: Purpose, version: str = PROMPT_VERSION) -> str:
+def load_rubric(purpose: Purpose, version: str = RUBRIC_VERSION) -> str:
     path = PROMPTS_DIR / f"content_rubric_{purpose.value.lower()}_{version}.md"
     return path.read_text(encoding="utf-8").strip()
 
@@ -617,6 +622,18 @@ def _postprocess(raw: _LlmContent, data: ContentInput, sent_ids: set[str]) -> Co
 # ---------------------------------------------------------------- 진입점
 
 
+def _warn_formal(result: ContentAnalysis) -> None:
+    texts: list[str | None] = [result.key_message]
+    texts += [i.reason for i in result.issues]
+    texts += [s.note for s in result.slide_coverage or []]
+    for q in result.expected_questions:
+        texts += [q.question, q.intent, q.answer_tip]
+    n = count_formal(texts)
+    if n:
+        # 글 내용은 남기지 않는다(대본 인용이 섞일 수 있음).
+        logger.warning("content: %d text field(s) not in 해요체", n)
+
+
 def _empty_result(data: ContentInput) -> ContentAnalysis:
     page_count = min(len(data.slides), MAX_SLIDE_PAGES) if data.slides else 0
     return ContentAnalysis(
@@ -691,6 +708,7 @@ def analyze_content(data: ContentInput, client: LlmClient, settings: Settings) -
             continue
         if result.dropped_items:
             logger.info("content: dropped %d invalid item(s)", result.dropped_items)
+        _warn_formal(result)
         usage = LlmUsage(
             model=model,
             attempts=attempt,
