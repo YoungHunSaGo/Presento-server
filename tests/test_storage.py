@@ -100,3 +100,57 @@ def test_blank_keys_do_not_override_default_chain_with_empty_strings(monkeypatch
 def test_minio_keeps_path_style():
     url = S3Storage(_settings()).presign_get("k", 60)
     assert urlparse(url).path == "/presento/k"
+
+
+# ---------- 집 서버: 서버 안은 http://minio:9000, 브라우저용 서명은 공개 주소 ----------
+
+HOME_PUBLIC = "http://100.101.102.103:9000"  # Tailscale 주소 예시
+
+
+def _home_settings(**kw):
+    base = {"s3_endpoint_url": "http://minio:9000", "s3_public_endpoint_url": HOME_PUBLIC}
+    return _settings(**{**base, **kw})
+
+
+class _Raw:
+    def stream(self, **_kw):
+        yield b""
+
+
+def _capture_requests(client, status=404):
+    """보내려던 요청 URL을 기록하고 네트워크 대신 가짜 응답을 돌려준다(외부 호출 없음)."""
+    from botocore.awsrequest import AWSResponse
+
+    sent: list[str] = []
+
+    def before_send(request, **_kw):
+        sent.append(request.url)
+        return AWSResponse(request.url, status, {}, _Raw())
+
+    client.meta.events.register("before-send.s3", before_send)
+    return sent
+
+
+def test_home_presigned_urls_use_public_address():
+    storage = S3Storage(_home_settings())
+    put = urlparse(storage.presign_put("videos/a-1", "video/webm", 900))
+    get = urlparse(storage.presign_get("videos/a-1", 3600))
+    for url in (put, get):
+        assert f"{url.scheme}://{url.netloc}" == HOME_PUBLIC  # 브라우저가 접속할 호스트로 서명
+        assert url.path == "/presento/videos/a-1"  # MinIO는 경로 방식
+
+
+def test_home_server_side_calls_use_internal_address():
+    storage = S3Storage(_home_settings())
+    sent = _capture_requests(storage._client)
+    assert storage.head("videos/a-1") is None  # 404 → 아직 업로드 안 됨
+    assert sent and all(urlparse(u).netloc == "minio:9000" for u in sent)
+    internal = urlparse(storage.presign_get_internal("videos/a-1", 60))
+    assert internal.netloc == "minio:9000"  # 워커의 ffprobe도 서버 안 주소로
+
+
+def test_home_public_address_unset_keeps_previous_behavior():
+    # 공개 주소를 비우면 예전처럼 내부 주소로 서명한다
+    storage = S3Storage(_home_settings(s3_public_endpoint_url=""))
+    assert urlparse(storage.presign_put("k", "video/webm", 60)).netloc == "minio:9000"
+    assert urlparse(storage.presign_get("k", 60)).netloc == "minio:9000"

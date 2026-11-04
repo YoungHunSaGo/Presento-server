@@ -129,6 +129,117 @@ cd ~/Presento-server && bash deploy/update.sh
   될 수 있다(재생 URL이 안 열리면 N5를 다시 부르면 된다).
 - DB 백업: `docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T postgres pg_dump -U presento presento | gzip > backup.sql.gz`
 
+## 집 서버 배포 (Ubuntu + Docker, Tailscale)
+
+AWS 대신 집 서버(RTX 3090, 같은 서버에서 HowMuch·Anima도 돎)에 띄우는 방법이다. AWS용 파일
+(`docker-compose.prod.yml`, `deploy/update.sh` 등)과는 별개다.
+
+| 파일 | 내용 |
+| --- | --- |
+| `docker-compose.home.yml` | 프로젝트 이름 `presento-home`: api, worker, postgres, redis, minio, minio-init(버킷 생성) |
+| `.env.home.example` | 설정 예시(비밀값은 비어 있음, 비밀번호는 필수) |
+| `deploy/home-update.sh` | git pull → 빌드 → DB 마이그레이션 → 재시작 → `/api/v1/health` 확인 → 저장소 확인 |
+
+- 호스트 포트는 `API_PORT`(기본 8000)·`MINIO_PORT`(기본 9000)로 바꿀 수 있고, `BIND_ADDR`(기본
+  127.0.0.1) 주소에만 연다. postgres·redis는 호스트에 열지 않는다.
+- 메모리 상한: api 768m, worker 1500m(동시 분석 1개), postgres 512m, redis 128m, minio 512m.
+  GPU는 쓰지 않는다(MediaPipe는 CPU, 받아쓰기·LLM은 OpenAI).
+- 서버 안에서는 `http://minio:9000`으로, 브라우저용 presigned URL은 `S3_PUBLIC_ENDPOINT_URL`로
+  서명한다. 서명에 호스트가 들어가므로 이 값은 브라우저가 실제로 접속하는 주소여야 한다.
+- MinIO CORS는 `CORS_ORIGINS`와 같은 값으로 자동 설정된다(허용한 주소에서 업로드 PUT·재생 GET 가능,
+  `ETag` 헤더 노출). MinIO는 쉼표 뒤 공백을 지우지 않으므로 `a,b`처럼 붙여 쓴다.
+- 앱은 MinIO 관리자 계정이 아니라 `minio-init`이 만든 전용 계정(`MINIO_APP_USER`, 이 버킷만 읽기·쓰기·삭제)을 쓴다.
+
+### 첫 설치
+
+```bash
+# 서버에 Docker(compose 플러그인 포함)와 Tailscale이 있어야 한다
+tailscale ip -4                       # 서버의 Tailscale 주소 확인. 예: 100.101.102.103
+git clone https://github.com/YoungHunSaGo/Presento-server.git ~/Presento-server
+cd ~/Presento-server
+cp .env.home.example .env.home && chmod 600 .env.home
+nano .env.home                        # 아래 값 채우기
+bash deploy/home-update.sh --no-pull  # 빌드·마이그레이션·실행(첫 빌드는 10분 안팎)
+```
+
+`.env.home`에서 채울 값:
+
+- `BIND_ADDR`: 서버의 Tailscale 주소(예: `100.101.102.103`). `0.0.0.0`은 쓰지 않는다(집 네트워크 전체에
+  열리고, Docker가 연 포트는 UFW 방화벽 규칙을 거치지 않는다).
+- `API_PORT`, `MINIO_PORT`: HowMuch·Anima와 겹치면 바꾼다(`ss -ltnp`로 사용 중인 포트 확인).
+- `S3_PUBLIC_ENDPOINT_URL`: `http://<BIND_ADDR>:<MINIO_PORT>`(예: `http://100.101.102.103:9000`)
+- `MINIO_ROOT_PASSWORD`, `MINIO_APP_PASSWORD`, `POSTGRES_PASSWORD`: 각각 `openssl rand -hex 24`
+  (주소에 들어가므로 영문·숫자만. `POSTGRES_PASSWORD`는 첫 실행 뒤 바꾸지 않는다)
+- `JWT_SECRET`: `openssl rand -hex 32`, `OPENAI_API_KEY`
+- `CORS_ORIGINS`: 프론트 주소(쉼표 구분). 친구가 자기 컴퓨터에서 `npm run dev`로 띄우면
+  `http://localhost:5173` 그대로 된다.
+
+Tailscale 주소에 포트를 묶으므로, 서버가 재부팅될 때 Docker가 Tailscale보다 먼저 뜨면 포트를 못 열어
+컨테이너가 시작되지 않을 수 있다(재시작 정책과 상관없이 Docker는 다시 시도하지 않는다). 처음 한 번
+아래를 설정해 둔다. 서버 전체 설정이지만 다른 서비스에는 영향이 없다.
+
+```bash
+echo 'net.ipv4.ip_nonlocal_bind=1' | sudo tee /etc/sysctl.d/99-presento-bind.conf
+sudo sysctl --system
+```
+
+### 갱신
+
+```bash
+cd ~/Presento-server && bash deploy/home-update.sh
+```
+
+진행 중인 분석이 있으면 워커는 그 분석이 끝날 때까지(최대 17분) 기다렸다가 새 버전으로 바뀐다.
+마지막에 api(`/api/v1/health`), 저장소, 워커, 호스트 포트를 확인하고 하나라도 실패하면 로그와 함께 멈춘다.
+정리는 이 프로젝트 이미지만 한다(다른 서비스의 이미지·빌드 캐시는 건드리지 않음).
+
+### 로그 확인
+
+```bash
+cd ~/Presento-server
+alias pc='docker compose -f docker-compose.home.yml --env-file .env.home'
+pc ps
+pc logs -f --tail 100 worker          # 분석 진행 상황
+pc logs -f --tail 100 api
+```
+
+### 중지
+
+```bash
+pc stop        # 잠깐 멈춤(다시 시작: pc start)
+pc down        # 컨테이너 삭제(데이터는 볼륨에 남음)
+```
+
+> **주의: `pc down -v`나 `docker volume rm`/`docker volume prune`은 쓰지 않는다.**
+> 회원·발표·리포트(DB)와 업로드한 영상(MinIO)이 모두 지워진다. 같은 서버의 다른 서비스를
+> 정리할 때도 `docker system prune --volumes`는 쓰지 않는다.
+
+### Tailscale로 접속하기(친구)
+
+1. 친구도 Tailscale을 설치하고, 서버 주인이 Tailscale 관리 화면에서 서버 기기를 친구에게
+   공유(Share)한다(또는 같은 tailnet에 초대).
+   - 공유하면 친구는 그 서버의 모든 포트에 접속할 수 있다(HowMuch·Anima 포함). Tailscale ACL에서 친구에게는
+     `API_PORT`·`MINIO_PORT`(예: tcp 8000, 9000)만 허용해 둔다.
+2. 친구 컴퓨터에서 확인: `curl http://100.101.102.103:8000/api/v1/health`
+3. 프론트 `.env`:
+
+   ```bash
+   VITE_API_BASE_URL=http://100.101.102.103:8000/api/v1
+   ```
+
+   영상 업로드·재생은 API가 주는 presigned URL(`http://100.101.102.103:9000/...`)로 브라우저가 직접
+   MinIO에 접속하므로, 친구 기기에서 MinIO 포트도 열려 있어야 한다(같은 Tailscale 주소라 따로 할 일은 없다).
+
+### 메모: HTTPS 프론트와 mixed content
+
+지금 API와 MinIO는 HTTP다. 친구가 프론트를 `https://`(Vercel 등)로 배포하면 브라우저가 HTTPS 페이지에서
+HTTP API·영상 주소를 막는다(mixed content, Chrome은 공개 사이트 → 사설 주소 요청도 막는다). 그때는
+Cloudflare Tunnel로 API와 MinIO에 HTTPS 주소를 붙이고, `VITE_API_BASE_URL`·`S3_PUBLIC_ENDPOINT_URL`·
+`CORS_ORIGINS`를 그 주소로 바꾼다.
+
+- Cloudflare 무료 요금제는 요청 본문이 100MB까지라, 100MB가 넘는 영상 업로드(PUT)는 413으로 실패한다.
+  터널로 바꿀 때 `MAX_VIDEO_BYTES`를 `99000000` 정도로 낮추거나, 업로드(MinIO)만 Tailscale로 남긴다.
+
 ## 얼굴 사진 픽스처 (선택)
 
 `tests/test_nonverbal.py`의 실제 얼굴 인식 테스트는 사진이 없으면 건너뛴다. 돌리려면:

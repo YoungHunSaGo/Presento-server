@@ -1,0 +1,174 @@
+# 집 서버(Ubuntu + Docker, RTX 3090) 실행 파일. AWS용은 docker-compose.prod.yml, 로컬 개발은
+# docker-compose.yml.
+#
+# 항상 deploy/home-update.sh로 실행한다(아래 명령과 같음).
+#   docker compose -f docker-compose.home.yml --env-file .env.home ...
+# --env-file은 이 파일 안의 ${...} 치환용이고, 각 컨테이너는 env_file로 같은 파일을 읽는다.
+#
+# - 같은 서버에서 HowMuch, Anima가 돈다. 호스트 포트는 API_PORT·MINIO_PORT로 바꿀 수 있고,
+#   BIND_ADDR(기본 127.0.0.1, Tailscale로 열려면 서버의 100.x 주소)에만 연다.
+#   postgres·redis는 호스트에 열지 않는다.
+# - 파일 저장은 같은 서버의 MinIO. 서버 안에서는 http://minio:9000, 브라우저용 presigned URL은
+#   S3_PUBLIC_ENDPOINT_URL로 서명한다(서명에 호스트가 들어가므로 브라우저가 접속할 주소여야 함).
+# - GPU는 쓰지 않는다(MediaPipe는 CPU, 받아쓰기·LLM은 OpenAI). 메모리 상한으로 다른 서비스와 공존.
+
+name: presento-home
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-app: &app
+  build: .
+  image: presento-server:home
+  env_file: .env.home
+  environment:
+    DATABASE_URL: postgresql+psycopg://presento:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 .env.home에 넣어 주세요}@postgres:5432/presento
+    REDIS_URL: redis://redis:6379/0
+    S3_ENDPOINT_URL: http://minio:9000
+    S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:?S3_PUBLIC_ENDPOINT_URL을 .env.home에 넣어 주세요(브라우저가 접속할 MinIO 주소)}
+    # 앱 전용 MinIO 계정(minio-init이 만든다, 이 버킷만 읽기·쓰기·삭제). 관리자 계정은 앱에 주지 않는다.
+    S3_ACCESS_KEY: ${MINIO_APP_USER:?MINIO_APP_USER를 .env.home에 넣어 주세요}
+    S3_SECRET_KEY: ${MINIO_APP_PASSWORD:?MINIO_APP_PASSWORD를 .env.home에 넣어 주세요}
+    S3_BUCKET: ${S3_BUCKET:-presento}
+  restart: unless-stopped
+  logging: *logging
+
+services:
+  api:
+    <<: *app
+    # 마이그레이션은 deploy/home-update.sh가 재시작 전에 따로 적용한다.
+    command: ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${API_PORT:-8000}:8000"
+    mem_limit: 768m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *app
+    # 분석(FFmpeg + MediaPipe)은 한 번에 하나만. 작업 10개마다 프로세스를 새로 띄워 메모리가
+    # 쌓이지 않게 한다.
+    command: ["celery", "-A", "app.workers.celery_app", "worker", "-l", "info",
+              "--concurrency", "1", "--max-tasks-per-child", "10"]
+    # 메모리가 넘치면 서버 전체가 아니라 워커만 죽는다. 죽은 작업은 task_reject_on_worker_lost로
+    # 큐에 돌아간다.
+    mem_limit: 1500m
+    # 갱신(재시작) 때 진행 중인 분석이 끝날 때까지 기다린다(task_time_limit 16분 + 여유).
+    stop_grace_period: 17m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: presento
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 .env.home에 넣어 주세요}
+      POSTGRES_DB: presento
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 512m
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U presento -d presento"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    # 작업 큐라 메시지를 지우면 안 된다(noeviction). 컨테이너 상한(128m)보다 작게 둔다.
+    # 서버가 갑자기 꺼져도 대기 중인 작업이 남게 AOF로 저장한다.
+    command: ["redis-server", "--maxmemory", "96mb", "--maxmemory-policy", "noeviction",
+              "--appendonly", "yes"]
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 128m
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # 개발용 docker-compose.yml과 같은 이미지(Chainguard MinIO, digest 고정).
+  # 이 digest = MinIO RELEASE.2026-10-23T20-06-51Z (mc 포함)
+  minio:
+    image: &minio-image cgr.dev/chainguard/minio@sha256:090010a3f73f6aa2dff606c61cd0de3640b22748abe19f4e48cce6dc9de7a53f
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER를 .env.home에 넣어 주세요}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD를 .env.home에 넣어 주세요}
+      # 브라우저가 presigned URL로 직접 PUT/GET하는 프론트 주소(앱의 CORS_ORIGINS와 같은 값, 쉼표 구분,
+      # 쉼표 뒤 공백 없이). MinIO는 버킷별 CORS 설정(PutBucketCors)을 지원하지 않아 서버 전체 설정으로
+      # 둔다(허용한 주소에는 모든 메서드 허용). 응답 헤더 노출에는 ETag가 기본으로 들어 있다.
+      MINIO_API_CORS_ALLOW_ORIGIN: ${CORS_ORIGINS:?CORS_ORIGINS를 .env.home에 넣어 주세요}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 512m
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # 버킷과 앱 전용 계정 만들기(여러 번 실행해도 같은 결과). 끝나면 종료한다.
+  # restart는 on-failure: 한 번 실행하고 끝나는 작업이라 unless-stopped면 성공해도 계속 다시 뜬다.
+  minio-init:
+    image: *minio-image
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      # 관리자 접속 정보는 명령 인자(프로세스 목록) 대신 환경 변수로 준다. 비밀번호는 영문·숫자만.
+      MC_HOST_local: http://${MINIO_ROOT_USER:?MINIO_ROOT_USER를 .env.home에 넣어 주세요}:${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD를 .env.home에 넣어 주세요}@minio:9000
+      APP_USER: ${MINIO_APP_USER:?MINIO_APP_USER를 .env.home에 넣어 주세요}
+      APP_PASSWORD: ${MINIO_APP_PASSWORD:?MINIO_APP_PASSWORD를 .env.home에 넣어 주세요}
+      S3_BUCKET: ${S3_BUCKET:-presento}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mc mb --ignore-existing "local/$$S3_BUCKET"
+        cat > /tmp/presento-app.json <<POLICY
+        {"Version": "2012-10-17", "Statement": [
+          {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+           "Resource": ["arn:aws:s3:::$$S3_BUCKET/*"]},
+          {"Effect": "Allow", "Action": ["s3:ListBucket", "s3:GetBucketLocation"],
+           "Resource": ["arn:aws:s3:::$$S3_BUCKET"]}]}
+        POLICY
+        mc admin policy create local presento-app /tmp/presento-app.json >/dev/null
+        mc admin user add local "$$APP_USER" "$$APP_PASSWORD" >/dev/null
+        mc admin policy attach local presento-app --user "$$APP_USER" >/dev/null 2>&1 \
+          || mc admin policy entities local --user "$$APP_USER" | grep -q presento-app
+        echo "bucket and app user ready"
+    restart: on-failure:5
+    logging: *logging
+    mem_limit: 128m
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
