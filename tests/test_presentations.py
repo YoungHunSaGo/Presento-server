@@ -149,6 +149,7 @@ def test_create_without_time_limit(client, auth_headers):
         ({"purpose": "CLASS"}, "title"),
         ({"title": "t"}, "purpose"),
         ({"title": "t", "purpose": "CLASS", "timeLimitSec": 0}, "timeLimitSec"),
+        ({"title": "t", "purpose": "CLASS", "timeLimitSec": 601}, "timeLimitSec"),
         ({"title": "t", "purpose": "CLASS", "timeLimitSec": "abc"}, "timeLimitSec"),
     ],
 )
@@ -510,3 +511,13 @@ def test_history_empty(client, create, auth_headers):
     pid = create()["id"]
     res = client.get(f"{BASE}/{pid}/history", headers=auth_headers)
     assert res.json() == {"items": []}
+
+
+@pytest.mark.parametrize("limit", [1, 600])
+def test_create_time_limit_bounds_ok(client, auth_headers, limit):
+    # 명세 P1: timeLimitSec은 1~600
+    res = client.post(
+        BASE, json={"title": "t", "purpose": "CLASS", "timeLimitSec": limit}, headers=auth_headers
+    )
+    assert res.status_code == 201
+    assert res.json()["timeLimitSec"] == limit

@@ -1,0 +1,139 @@
+# 운영(EC2) 실행 파일. 로컬 개발은 docker-compose.yml(MinIO 포함)을 쓴다.
+#
+# 항상 deploy/update.sh로 실행한다(아래 명령과 같음).
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod ...
+# --env-file은 이 파일 안의 ${...} 치환용이고, 각 컨테이너는 env_file로 같은 파일을 읽는다.
+#
+# - 파일 저장은 AWS S3(MinIO 없음). 자격 증명은 EC2 인스턴스 IAM 역할(.env.prod의 S3 키는 비움).
+# - 외부에 여는 포트는 Caddy의 80/443뿐. api·postgres·redis는 내부 네트워크에서만 접속한다.
+# - 메모리 2GB 인스턴스 기준: 워커 동시 실행 1, Redis 메모리 상한.
+
+# 같은 폴더의 개발용 docker-compose.yml과 볼륨·컨테이너가 섞이지 않게 이름을 따로 둔다.
+name: presento-prod
+
+x-app: &app
+  build: .
+  image: presento-server:prod
+  env_file: .env.prod
+  environment:
+    DATABASE_URL: postgresql+psycopg://presento:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 .env.prod에 넣어 주세요}@postgres:5432/presento
+    REDIS_URL: redis://redis:6379/0
+    # EC2 역할 자격 증명(IMDS) 조회가 시작 직후 느려도 넉넉히 기다린다.
+    AWS_METADATA_SERVICE_TIMEOUT: "2"
+    AWS_METADATA_SERVICE_NUM_ATTEMPTS: "3"
+  restart: unless-stopped
+  logging: &logging
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  api:
+    <<: *app
+    # 마이그레이션은 deploy/update.sh가 재시작 전에 따로 적용한다.
+    # Caddy 뒤에 있으므로 X-Forwarded-* 헤더를 믿는다(api 포트는 외부에 열지 않음).
+    command:
+      - uvicorn
+      - app.main:create_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - "*"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    <<: *app
+    # 메모리 2GB: 분석(FFmpeg + MediaPipe)은 한 번에 하나만. 작업 10개마다 프로세스를 새로 띄워
+    # 메모리가 쌓이지 않게 한다.
+    command:
+      - celery
+      - -A
+      - app.workers.celery_app
+      - worker
+      - -l
+      - info
+      - --concurrency
+      - "1"
+      - --max-tasks-per-child
+      - "10"
+    # 메모리가 넘치면 시스템 전체(OOM)가 아니라 워커만 죽게 상한을 둔다(스왑 포함 2.5GB).
+    # 워커가 죽은 작업은 task_reject_on_worker_lost로 큐에 돌아간다.
+    mem_limit: 1200m
+    memswap_limit: 2500m
+    # 배포(재시작) 때 진행 중인 분석이 끝날 때까지 기다린다(task_time_limit 16분 + 여유).
+    stop_grace_period: 17m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: presento
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 .env.prod에 넣어 주세요}
+      POSTGRES_DB: presento
+    restart: unless-stopped
+    logging: *logging
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U presento -d presento"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    # 작업 큐라 메시지를 지우면 안 된다(noeviction). 메모리 상한만 둔다.
+    # 서버가 갑자기 꺼져도 대기 중인 작업이 남게 AOF로 저장한다.
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction",
+              "--appendonly", "yes"]
+    restart: unless-stopped
+    logging: *logging
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  caddy:
+    image: caddy:2.10.2-alpine
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN을 .env.prod에 넣어 주세요}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    restart: unless-stopped
+    logging: *logging
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data  # 발급받은 인증서. 지우면 재발급(Let's Encrypt 발급 횟수 제한 주의)
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:
+  caddy_data:
+  caddy_config:

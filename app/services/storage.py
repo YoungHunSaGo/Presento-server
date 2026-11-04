@@ -29,13 +29,19 @@ class Storage(Protocol):
 class S3Storage:
     def __init__(self, settings: Settings) -> None:
         self.bucket = settings.s3_bucket
+        # 키가 비어 있으면 None → boto3 기본 자격 증명 체인(운영: EC2 인스턴스 IAM 역할).
+        key = settings.s3_access_key.get_secret_value().strip() or None
+        secret = settings.s3_secret_key.get_secret_value().strip() or None
+        # MinIO(주소 지정)는 경로 방식, AWS S3(주소 없음)는 가상 호스트 방식
+        # (bucket.s3.<region>.amazonaws.com — AWS 권장, 경로 방식은 지원 종료 예정).
+        aws = settings.s3_endpoint_url is None and settings.s3_public_endpoint_url is None
         common = {
             "region_name": settings.s3_region,
-            "aws_access_key_id": settings.s3_access_key.get_secret_value() or None,
-            "aws_secret_access_key": settings.s3_secret_key.get_secret_value() or None,
+            "aws_access_key_id": key,
+            "aws_secret_access_key": secret,
             "config": Config(
                 signature_version="s3v4",
-                s3={"addressing_style": "path"},
+                s3={"addressing_style": "virtual" if aws else "path"},
                 connect_timeout=3,
                 read_timeout=10,
                 retries={"max_attempts": 2, "mode": "standard"},

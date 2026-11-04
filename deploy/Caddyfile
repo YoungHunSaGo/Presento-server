@@ -1,0 +1,21 @@
+# DOMAIN(예: api.3-38-12-34.sslip.io)으로 Let's Encrypt 인증서를 자동 발급·갱신한다.
+# 80 포트는 인증서 발급 확인과 HTTPS 리다이렉트에 쓰인다(보안 그룹에서 80, 443을 열어야 함).
+{$DOMAIN} {
+	encode zstd gzip
+
+	# API와 문서(Swagger UI는 /openapi.json을 읽는다)만 프록시하고 나머지는 404.
+	@api path /api/v1 /api/v1/* /docs /docs/* /openapi.json
+	handle @api {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+}

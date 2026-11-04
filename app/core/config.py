@@ -5,7 +5,7 @@
 
 from functools import lru_cache
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +14,8 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # 설정 검증 실패 메시지에 입력값(비밀값)을 넣지 않는다(시작 실패 로그로 새지 않게).
+        hide_input_in_errors=True,
     )
 
     # OpenAI
@@ -44,6 +46,8 @@ class Settings(BaseSettings):
     # 비우면 s3_endpoint_url을 쓴다(AWS S3는 둘 다 비움).
     s3_public_endpoint_url: str | None = None
     s3_bucket: str = "presento"
+    # 둘 다 비우면 boto3 기본 자격 증명(EC2 인스턴스 IAM 역할, AWS_* 환경 변수 등)을 쓴다.
+    # 하나만 채우는 것은 설정 실수라 시작할 때 막는다.
     s3_access_key: SecretStr = SecretStr("")
     s3_secret_key: SecretStr = SecretStr("")
     s3_region: str = "ap-northeast-2"
@@ -95,6 +99,16 @@ class Settings(BaseSettings):
         if len(v.get_secret_value()) < 32:
             raise ValueError("JWT_SECRET must be at least 32 characters")
         return v
+
+    @model_validator(mode="after")
+    def _s3_keys_pair(self) -> "Settings":
+        has_key = bool(self.s3_access_key.get_secret_value().strip())
+        has_secret = bool(self.s3_secret_key.get_secret_value().strip())
+        if has_key != has_secret:
+            raise ValueError(
+                "S3_ACCESS_KEY and S3_SECRET_KEY must both be set or both be empty (IAM role)"
+            )
+        return self
 
     @property
     def cors_origin_list(self) -> list[str]:
