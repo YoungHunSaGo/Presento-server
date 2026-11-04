@@ -9,6 +9,7 @@ import openai
 import pytest
 
 from app.models.enums import Purpose, ScoreCategory
+from app.models.enums import ScoreCategory as Cat
 from app.schemas.report import (
     FeedbackType,
     FillerStat,
@@ -29,6 +30,7 @@ from app.services.pipeline.feedback import (
     build_candidates,
     generate_feedback,
 )
+from app.services.pipeline.korean_style import formal_sentences
 from app.services.pipeline.nonverbal import NonverbalAnalysis
 from app.services.pipeline.speech_metrics import Silence, SpeechAnalysis, WordHit
 
@@ -537,7 +539,10 @@ def test_zero_candidates_does_not_call_llm(llm_settings):
     client = FakeLlm(resp(payload()))
     r = generate_feedback(data(), client, llm_settings)
     assert client.calls == []
-    assert r.feedbacks == [] and r.overall is None and r.improved_scripts == []
+    assert r.feedbacks == [] and r.improved_scripts == []
+    # LLM을 안 불러도 overall은 코드 기본 문구로 채운다(절대 null 아님)
+    assert r.overall.summary and r.overall.strengths and r.overall.improvements
+    assert r.overall_fallback
     assert r.usage is None
 
 
@@ -852,7 +857,8 @@ def test_best_attempt_prefers_valid_overall(llm_settings):
     client = FakeLlm(resp(no_overall), resp(second), resp(worse))
     r = generate_feedback(rich_input(), client, llm_settings)
     assert len(client.calls) == 3
-    assert r.overall is not None and len(r.feedbacks) == 3
+    assert r.overall.summary.startswith("전체 말 속도는") and len(r.feedbacks) == 3
+    assert not r.overall_fallback
 
 
 def test_improved_script_reason_digit_and_braces_rejected(llm_settings):
@@ -864,3 +870,81 @@ def test_improved_script_reason_digit_and_braces_rejected(llm_settings):
     client = FakeLlm(resp(p))
     r = generate_feedback(rich_input(), client, llm_settings)
     assert r.improved_scripts == []
+
+
+# ---------- overall 기본 문구(절대 null 아님) ----------
+
+
+def _all_text(o) -> list[str]:
+    return [o.summary, *o.strengths, *o.improvements]
+
+
+def test_fallback_uses_scores_and_top_feedback_titles():
+    scores = {Cat.DELIVERY: 72, Cat.NONVERBAL: 85, Cat.CONTENT: 64}
+    f_info = SimpleNamespace(title="시선이 벗어나요", severity=Severity.INFO, start=5.0)
+    f_crit = SimpleNamespace(title="말이 너무 빨라요", severity=Severity.CRITICAL, start=50.0)
+    o = fb.fallback_overall(scores, [f_info, f_crit])
+    assert o.summary == "비언어가 가장 좋았어요. 내용 구성을 보완하면 더 좋아질 거예요."
+    assert o.strengths == ["비언어가 좋아요"]
+    assert o.improvements == ["말이 너무 빨라요", "시선이 벗어나요"]  # 심각한 것부터
+
+
+def test_fallback_without_feedback_uses_low_categories():
+    o = fb.fallback_overall({Cat.DELIVERY: 90, Cat.NONVERBAL: 70, Cat.CONTENT: 60}, [])
+    assert o.strengths == ["전달력이 좋아요"]
+    assert o.improvements == ["내용 구성을 더 다듬어 보세요", "비언어를 더 다듬어 보세요"]
+
+
+def test_fallback_without_feedback_uses_candidate_titles():
+    c = fb.Candidate(FeedbackType.FILLER, Severity.WARNING, 0, 5)
+    o = fb.fallback_overall({Cat.DELIVERY: 70, Cat.NONVERBAL: 70, Cat.CONTENT: 70}, [], [c])
+    assert o.summary == "세 영역이 고르게 나왔어요. 아래 피드백을 하나씩 연습해 보세요."
+    assert o.improvements == ["추임새가 많아요"]
+
+
+@pytest.mark.parametrize(
+    "scores",
+    [None, {}, {Cat.DELIVERY: 95, Cat.NONVERBAL: 95, Cat.CONTENT: 95},
+     {Cat.DELIVERY: 10, Cat.NONVERBAL: 20, Cat.CONTENT: 30}],
+)  # fmt: skip
+def test_fallback_is_never_empty_and_haeyo(scores):
+    o = fb.fallback_overall(scores, [])
+    assert o.summary and o.strengths and o.improvements
+    assert all(formal_sentences(t) == [] for t in _all_text(o))
+    assert not any(ch.isdigit() for t in _all_text(o) for ch in t)
+
+
+def test_default_titles_cover_every_candidate_type():
+    for t in fb.CATEGORY_OF:
+        if t is not FeedbackType.SLIDE_MISSED:
+            assert t in fb.DEFAULT_TITLE
+
+
+def test_llm_overall_invalid_falls_back(llm_settings):
+    bad = payload()
+    bad["overall"]["summary"] = "분당 320음절이에요."  # 매번 위반 → overall 없음
+    client = FakeLlm(resp(bad))
+    d = rich_input()
+    d = FeedbackInput(
+        **{**d.__dict__, "category_scores": {Cat.DELIVERY: 70, Cat.NONVERBAL: 88, Cat.CONTENT: 75}}
+    )
+    r = generate_feedback(d, client, llm_settings)
+    assert len(client.calls) == 3
+    assert r.overall_fallback
+    assert r.overall.summary == "비언어가 가장 좋았어요. 전달력을 보완하면 더 좋아질 거예요."
+    assert r.overall.improvements[0] == "도입부 말이 빨라요"  # 상위 피드백 제목(LLM이 쓴 것)
+
+
+def test_llm_overall_empty_lists_are_filled(llm_settings):
+    p = payload()
+    p["overall"]["strengths"] = []
+    r = generate_feedback(rich_input(), FakeLlm(resp(p)), llm_settings)
+    assert r.overall.summary.startswith("전체 말 속도는")  # LLM summary는 그대로
+    assert r.overall.strengths == ["끝까지 발표를 마쳤어요"]  # 점수 없음 → 기본 문구
+    assert r.overall_fallback
+
+
+def test_prompt_v2_count_wording_rule():
+    prompt = fb.load_system_prompt()
+    assert fb.PROMPT_VERSION == "v2"
+    assert "'여러 번'" in prompt.replace('"', "'") and "'한 번 더'" in prompt.replace('"', "'")

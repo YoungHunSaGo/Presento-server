@@ -24,8 +24,9 @@
    침묵은 침묵 직전 문장, 시간 초과는 제한 시간 시점의 문장. 비언어·시간 미달은 null.
 
 말투: 해요체. 합쇼체 문장은 경고 로그만(재시도 안 함).
-후보가 0개면 LLM을 부르지 않는다(overall은 None). 재시도 끝에도 overall이 유효하지 않으면 None일 수
-있으므로 리포트 조립 단계에서 대체 문구를 둔다.
+overall은 절대 None이 아니다. 후보가 0개라 LLM을 부르지 않았거나, LLM의 overall이 끝내 유효하지
+않으면(또는 strengths·improvements가 비면) 코드가 카테고리 점수와 상위 피드백 제목으로 해요체
+기본 문구를 만든다(fallback_overall). 카테고리 점수는 scoring이 먼저 계산해 넘긴다.
 
 에러 구분: FeedbackServiceError → AI_SERVICE_ERROR
 """
@@ -60,7 +61,7 @@ from app.services.pipeline.speech_metrics import SpeechAnalysis
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 
 # ---- 정리 ----
@@ -213,6 +214,8 @@ class FeedbackInput:
     speech: SpeechAnalysis
     nonverbal: NonverbalAnalysis | None = None
     content: ContentAnalysis | None = None
+    # scoring이 먼저 계산한 카테고리 점수(overall 기본 문구용). 없으면 점수 없이 문구를 만든다.
+    category_scores: dict[ScoreCategory, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -234,11 +237,12 @@ class LlmUsage:
 @dataclass(frozen=True)
 class FeedbackResult:
     feedbacks: list[Feedback]
-    overall: OverallText | None  # LLM을 안 불렀거나 끝내 유효한 overall을 못 받으면 None
+    overall: OverallText  # 절대 None이 아니다(LLM이 못 쓰면 코드 기본 문구)
     improved_scripts: list[ImprovedScript]
     candidates: list[Candidate]
     usage: LlmUsage | None = None  # LLM을 부르지 않았으면 None
     dropped_items: int = 0
+    overall_fallback: bool = False  # overall의 일부라도 코드 기본 문구를 썼는지
 
 
 def _seg_ids_in(transcript: Transcript, start: float, end: float) -> tuple[str, ...]:
@@ -975,10 +979,117 @@ def _retry_note(problems: set[str]) -> str:
     )
 
 
+# ---------------------------------------------------------------- overall 기본 문구
+
+CATEGORY_LABEL: dict[ScoreCategory, str] = {
+    ScoreCategory.DELIVERY: "전달력",
+    ScoreCategory.NONVERBAL: "비언어",
+    ScoreCategory.CONTENT: "내용 구성",
+}
+FALLBACK_STRENGTH_SCORE = 80  # 이 점수 이상인 카테고리를 강점으로
+FALLBACK_IMPROVEMENT_SCORE = 80  # 피드백이 없을 때 이 점수 미만인 카테고리를 개선점으로
+
+# LLM 제목이 없을 때 쓰는 후보 종류별 기본 제목(해요체)
+DEFAULT_TITLE: dict[FeedbackType, str] = {
+    FeedbackType.PACE_FAST: "말이 빨라요",
+    FeedbackType.PACE_SLOW: "말이 느려요",
+    FeedbackType.FILLER: "추임새가 많아요",
+    FeedbackType.LONG_SILENCE: "말이 길게 끊겨요",
+    FeedbackType.OVER_TIME: "제한 시간을 넘었어요",
+    FeedbackType.UNDER_TIME: "발표가 짧아요",
+    FeedbackType.GAZE_AWAY: "시선이 화면 밖으로 벗어나요",
+    FeedbackType.POSTURE_UNSTABLE: "몸이 많이 흔들려요",
+    FeedbackType.GESTURE_NONE: "손동작이 거의 없어요",
+    FeedbackType.GESTURE_EXCESS: "손동작이 너무 많아요",
+    FeedbackType.STRUCTURE: "구성이 매끄럽지 않아요",
+    FeedbackType.CLARITY: "표현이 모호해요",
+}
+
+
+def _has_batchim(word: str) -> bool:
+    ch = word[-1]
+    return "가" <= ch <= "힣" and (ord(ch) - ord("가")) % 28 != 0
+
+
+def _subj(word: str) -> str:
+    return word + ("이" if _has_batchim(word) else "가")
+
+
+def _obj_josa(word: str) -> str:
+    return word + ("을" if _has_batchim(word) else "를")
+
+
+def fallback_overall(
+    scores: dict[ScoreCategory, int] | None,
+    feedbacks: Sequence[Feedback],
+    candidates: Sequence[Candidate] = (),
+) -> OverallText:
+    """코드가 만드는 overall 기본 문구(해요체). 점수·피드백이 없어도 항상 채운다."""
+    ranked = sorted(feedbacks, key=lambda f: (-_SEVERITY_RANK[f.severity], f.start))
+    titles = list(dict.fromkeys(f.title for f in ranked))
+    if not titles:
+        by_sev = sorted(candidates, key=lambda c: (-_SEVERITY_RANK[c.severity], c.start))
+        titles = list(
+            dict.fromkeys(DEFAULT_TITLE[c.type] for c in by_sev if c.type in DEFAULT_TITLE)
+        )
+
+    if scores:
+        ordered = sorted(scores.items(), key=lambda kv: (-kv[1], list(CATEGORY_LABEL).index(kv[0])))
+        best_cat, best = ordered[0]
+        worst_cat, worst = ordered[-1]
+        best_label, worst_label = CATEGORY_LABEL[best_cat], CATEGORY_LABEL[worst_cat]
+        if best == worst:
+            summary = "세 영역이 고르게 나왔어요. 아래 피드백을 하나씩 연습해 보세요."
+        else:
+            summary = (
+                f"{_subj(best_label)} 가장 좋았어요. "
+                f"{_obj_josa(worst_label)} 보완하면 더 좋아질 거예요."
+            )
+        strengths = [
+            f"{_subj(CATEGORY_LABEL[c])} 좋아요" for c, v in ordered if v >= FALLBACK_STRENGTH_SCORE
+        ] or [f"{_subj(best_label)} 상대적으로 안정적이에요"]
+        weak = [
+            f"{_obj_josa(CATEGORY_LABEL[c])} 더 다듬어 보세요"
+            for c, v in reversed(ordered)
+            if v < FALLBACK_IMPROVEMENT_SCORE
+        ]
+    else:
+        summary = "분석이 끝났어요. 아래 피드백을 하나씩 확인해 보세요."
+        strengths = ["끝까지 발표를 마쳤어요"]
+        weak = []
+    improvements = (
+        titles[:MAX_OVERALL_ITEMS] or weak[:MAX_OVERALL_ITEMS] or ["지금처럼 꾸준히 연습해 보세요"]
+    )
+    return OverallText(
+        summary=summary,
+        strengths=strengths[:MAX_OVERALL_ITEMS],
+        improvements=improvements,
+    )
+
+
+def _complete_overall(got: OverallText | None, fallback: OverallText) -> tuple[OverallText, bool]:
+    """LLM overall의 빈 부분을 기본 문구로 채운다. (결과, 기본 문구를 썼는지)"""
+    if got is None:
+        return fallback, True
+    used = False
+    strengths, improvements = got.strengths, got.improvements
+    if not strengths:
+        strengths, used = fallback.strengths, True
+    if not improvements:
+        improvements, used = fallback.improvements, True
+    return OverallText(summary=got.summary, strengths=strengths, improvements=improvements), used
+
+
 def generate_feedback(data: FeedbackInput, client: LlmClient, settings: Settings) -> FeedbackResult:
     cands = build_candidates(data)
     if not cands:
-        return FeedbackResult(feedbacks=[], overall=None, improved_scripts=[], candidates=[])
+        return FeedbackResult(
+            feedbacks=[],
+            overall=fallback_overall(data.category_scores, []),
+            improved_scripts=[],
+            candidates=[],
+            overall_fallback=True,
+        )
 
     model = settings.openai_llm_model.strip()
     if not model:
@@ -1045,9 +1156,15 @@ def generate_feedback(data: FeedbackInput, client: LlmClient, settings: Settings
     if best.dropped:
         logger.info("feedback: dropped %d invalid item(s)", best.dropped)
     _warn_formal(best)
+    overall, used_fallback = _complete_overall(
+        best.overall, fallback_overall(data.category_scores, best.feedbacks, cands)
+    )
+    if used_fallback:
+        logger.info("feedback: overall filled with code fallback text")
     return FeedbackResult(
         feedbacks=best.feedbacks,
-        overall=best.overall,
+        overall=overall,
+        overall_fallback=used_fallback,
         improved_scripts=best.improved,
         candidates=list(cands),
         usage=LlmUsage(
