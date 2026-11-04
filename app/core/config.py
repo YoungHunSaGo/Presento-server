@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     mediapipe_face_model_path: str = "/opt/models/face_landmarker.task"
     mediapipe_pose_model_path: str = "/opt/models/pose_landmarker_full.task"
 
+    # true면 실제 분석 대신 명세 예시 리포트를 쓰는 가짜 파이프라인(프론트 개발용, API 비용 없음)
+    use_fake_pipeline: bool = False
+    # 워커 임시 파일 위치(비우면 시스템 임시 폴더). 분석이 끝나면 성공·실패 모두 지운다.
+    work_dir: str | None = None
+
     # 가짜 파이프라인(마일스톤 4): 단계당 걸리는 시간(초). 명세 요청: 1~2초
     fake_stage_seconds: float = Field(default=1.5, ge=0, le=10)
     # N2에서 영상 길이를 빠르게 확인할 때 ffprobe 제한 시간(초)

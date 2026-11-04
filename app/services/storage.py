@@ -1,6 +1,7 @@
 """S3 호환 스토리지: presigned PUT/GET URL 발급, 파일 존재 확인, 삭제."""
 
 import logging
+from pathlib import Path
 from typing import Protocol
 
 import boto3
@@ -22,6 +23,7 @@ class Storage(Protocol):
     def presign_get_internal(self, key: str, expires_in: int) -> str: ...
     def head(self, key: str) -> int | None: ...
     def delete(self, key: str) -> None: ...
+    def download(self, key: str, dest: Path) -> None: ...
 
 
 class S3Storage:
@@ -80,6 +82,13 @@ class S3Storage:
     def delete(self, key: str) -> None:
         try:
             self._client.delete_object(Bucket=self.bucket, Key=key)
+        except (ClientError, BotoCoreError) as e:
+            raise StorageError(str(e)) from e
+
+    def download(self, key: str, dest: Path) -> None:
+        """워커가 분석할 파일을 로컬로 받는다."""
+        try:
+            self._client.download_file(self.bucket, key, str(dest))
         except (ClientError, BotoCoreError) as e:
             raise StorageError(str(e)) from e
 

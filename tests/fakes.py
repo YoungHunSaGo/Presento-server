@@ -11,6 +11,9 @@ class FakeStorage:
         self.head_calls: list[str] = []
         self.fail_head = False
         self.fail_delete = False
+        self.files: dict[str, bytes] = {}  # download 내용
+        self.downloads: list[str] = []
+        self.fail_download = False
 
     def presign_put(self, key: str, content_type: str, expires_in: int) -> str:
         self.presigned.append(("PUT", key, content_type, expires_in))
@@ -34,6 +37,13 @@ class FakeStorage:
             raise StorageError("fake delete failure")
         self.objects.pop(key, None)
         self.deleted.append(key)
+
+    def download(self, key: str, dest) -> None:
+        """files에 넣은 내용(없으면 크기만큼 0바이트)을 dest에 쓴다."""
+        self.downloads.append(key)
+        if self.fail_download or key not in self.objects and key not in self.files:
+            raise StorageError("fake download failure")
+        dest.write_bytes(self.files.get(key, b"\0" * self.objects.get(key, 0)))
 
 
 class FakeQueue:

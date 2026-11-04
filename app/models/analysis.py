@@ -53,6 +53,11 @@ class Analysis(Base):
     filler_count: Mapped[int | None] = mapped_column(Integer)
     syllables_per_min: Mapped[int | None] = mapped_column(Integer)
 
+    # 결과 재사용(같은 영상 해시). cache_key = 영상 해시 + 목적·제한 시간·슬라이드 + 파이프라인 버전
+    video_sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    cache_key: Mapped[str | None] = mapped_column(String(64), index=True)
+    pipeline_version: Mapped[str | None] = mapped_column(String(20))
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
