@@ -3,6 +3,7 @@
 비밀값은 SecretStr로 감싸 repr/로그에 값이 찍히지 않게 한다.
 """
 
+import re
 from functools import lru_cache
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -112,7 +113,24 @@ class Settings(BaseSettings):
 
     @property
     def cors_origin_list(self) -> list[str]:
-        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip() and "*" not in o]
+
+    @property
+    def cors_origin_regex(self) -> str | None:
+        """CORS_ORIGINS의 와일드카드(예: https://presento2*.vercel.app)를 정규식으로 바꾼다.
+
+        MinIO(MINIO_API_CORS_ALLOW_ORIGIN)는 글롭 패턴을 그대로 알아듣지만,
+        FastAPI(Starlette) CORSMiddleware의 allow_origins는 정확한 문자열만 비교하므로
+        와일드카드 항목은 allow_origin_regex로 넘긴다('*' 단독은 제외).
+        """
+        patterns: list[str] = []
+        for raw in self.cors_origins.split(","):
+            item = raw.strip()
+            if not item or "*" not in item or item == "*":
+                continue
+            parts = [re.escape(p) for p in item.split("*")]
+            patterns.append("[A-Za-z0-9_-]*".join(parts))
+        return f"^({'|'.join(patterns)})$" if patterns else None
 
 
 @lru_cache

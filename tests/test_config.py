@@ -29,6 +29,25 @@ def test_missing_secrets_rejected():
 def test_cors_origin_list_parses_comma_separated():
     s = Settings(_env_file=None, **_VALID, cors_origins="http://a.com, http://b.com,")
     assert s.cors_origin_list == ["http://a.com", "http://b.com"]
+    assert s.cors_origin_regex is None
+
+
+def test_cors_origin_wildcard_regex():
+    import re
+
+    s = Settings(
+        _env_file=None,
+        **_VALID,
+        cors_origins="http://localhost:5173,https://presento2*.vercel.app",
+    )
+    assert s.cors_origin_list == ["http://localhost:5173"]
+    assert s.cors_origin_regex is not None
+    pat = re.compile(s.cors_origin_regex)
+    assert pat.match("https://presento2.vercel.app")
+    assert pat.match("https://presento2-snowy.vercel.app")
+    assert pat.match("https://presento2-git-main-user.vercel.app")
+    assert not pat.match("https://other.vercel.app")
+    assert not pat.match("https://presento2.vercel.app.evil.com")
 
 
 def test_importing_celery_app_does_not_load_settings():
