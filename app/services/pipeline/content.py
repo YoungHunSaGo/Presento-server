@@ -42,15 +42,16 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 
-import openai
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.core.config import Settings
 from app.models.enums import Purpose
 from app.schemas.report import ExpectedQuestion, SlideCoverage, Transcript
+from app.services.pipeline import llm
 from app.services.pipeline.korean_style import count_formal
+from app.services.pipeline.llm import LlmClient
 
 logger = logging.getLogger(__name__)
 
@@ -98,16 +99,6 @@ _SEGMENT_ID = re.compile(r"^s-\d{3,}$")
 
 class ContentServiceError(Exception):
     """LLM 호출 실패, 또는 재시도해도 쓸 수 있는 응답을 못 받았다."""
-
-
-class _ResponsesAPI(Protocol):
-    def create(self, **kwargs: Any) -> Any: ...
-
-
-class LlmClient(Protocol):
-    """openai.OpenAI 중 이 모듈이 쓰는 부분. 테스트에서 가짜로 바꾼다."""
-
-    responses: _ResponsesAPI
 
 
 # ---------------------------------------------------------------- 결과
@@ -399,57 +390,22 @@ def build_user_input(data: ContentInput) -> tuple[str, bool, set[str]]:
 
 
 def make_client(settings: Settings) -> LlmClient:
-    return openai.OpenAI(
-        api_key=settings.openai_api_key.get_secret_value(),
-        timeout=settings.openai_timeout_sec,
-        max_retries=settings.openai_max_retries,
-    )
+    return llm.make_client(settings)
 
 
 def _request_kwargs(model: str, instructions: str, user_input: str) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "instructions": instructions,
-        "input": user_input,
-        "max_output_tokens": MAX_OUTPUT_TOKENS,
-        "store": False,
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": f"content_analysis_{PROMPT_VERSION}",
-                "schema": RESPONSE_SCHEMA,
-                "strict": True,
-            }
-        },
-    }
-    if model.startswith("gpt-5"):
-        kwargs["reasoning"] = {"effort": REASONING_EFFORT}
-    return kwargs
-
-
-def _int(v: Any) -> int:
-    return int(v) if isinstance(v, int | float) and not isinstance(v, bool) else 0
-
-
-def _usage_tokens(response: Any) -> tuple[int, int, int, int]:
-    """(입력, 출력, 그중 추론, 그중 캐시된 입력) 토큰."""
-    usage = getattr(response, "usage", None)
-    out_details = getattr(usage, "output_tokens_details", None)
-    in_details = getattr(usage, "input_tokens_details", None)
-    return (
-        _int(getattr(usage, "input_tokens", 0)),
-        _int(getattr(usage, "output_tokens", 0)),
-        _int(getattr(out_details, "reasoning_tokens", 0)),
-        _int(getattr(in_details, "cached_tokens", 0)),
+    return llm.structured_kwargs(
+        model=model,
+        name=f"content_analysis_{PROMPT_VERSION}",
+        schema=RESPONSE_SCHEMA,
+        instructions=instructions,
+        user_input=user_input,
+        max_output_tokens=MAX_OUTPUT_TOKENS,
     )
 
 
 def _cost(settings: Settings, input_tokens: int, output_tokens: int) -> float:
-    # 캐시 할인은 빼고 계산한다(실제보다 조금 높게 잡힘).
-    return (
-        input_tokens * settings.openai_llm_input_usd_per_1m
-        + output_tokens * settings.openai_llm_output_usd_per_1m
-    ) / 1_000_000
+    return llm.estimate_cost(settings, input_tokens, output_tokens)
 
 
 class _Invalid(Exception):
@@ -460,23 +416,15 @@ class _TokenLimit(Exception):
     """출력 토큰 상한에 걸려 잘렸다."""
 
 
-def _is_refusal(response: Any) -> bool:
-    for item in getattr(response, "output", None) or []:
-        for part in getattr(item, "content", None) or []:
-            if getattr(part, "type", None) == "refusal":
-                return True
-    return False
-
-
 def _parse(response: Any) -> _LlmContent:
-    if _is_refusal(response):
+    if llm.is_refusal(response):
         raise ContentServiceError("llm refused")
-    status = getattr(response, "status", None)
-    if status == "incomplete":
-        reason = getattr(getattr(response, "incomplete_details", None), "reason", None)
-        if reason == "max_output_tokens":
-            raise _TokenLimit
+    reason = llm.incomplete_reason(response)
+    if reason == "max_output_tokens":
+        raise _TokenLimit
+    if reason is not None:
         raise ContentServiceError(f"llm response incomplete: {reason}")
+    status = getattr(response, "status", None)
     if status not in (None, "completed"):
         raise ContentServiceError(f"llm response status {status}")
     text = getattr(response, "output_text", None)
@@ -666,33 +614,17 @@ def analyze_content(data: ContentInput, client: LlmClient, settings: Settings) -
     total_in = total_out = 0
     last_problem = ""
     for attempt in range(1, MAX_RETRIES + 2):
-        failure: str | None = None
-        response: Any = None
+        # API 실패는 SDK가 이미 재시도했다. 같은 요청을 더 보내 크레딧을 쓰지 않는다.
+        error: str | None = None
         try:
-            response = client.responses.create(**kwargs)
-        except openai.APIStatusError as e:
-            failure = f"status={e.status_code} type={type(e).__name__}"
-        except openai.OpenAIError as e:
-            failure = f"type={type(e).__name__}"
-        if failure is not None:
-            # SDK가 이미 재시도했다. 같은 요청을 더 보내 크레딧을 쓰지 않는다.
-            logger.warning("content llm request failed: %s", failure)
-            raise ContentServiceError(f"llm request failed: {failure}")
-
-        inp, out, reasoning, cached = _usage_tokens(response)
+            response = llm.call(client, kwargs, "content")
+        except llm.LlmCallError as e:
+            error = str(e)
+        if error is not None:
+            raise ContentServiceError(error)
+        inp, out = llm.log_usage("content", model, attempt, response, settings)
         total_in += inp
         total_out += out
-        logger.info(
-            "content llm call: model=%s attempt=%d input_tokens=%d cached_tokens=%d "
-            "output_tokens=%d reasoning_tokens=%d est_cost_usd=%.5f",
-            model,
-            attempt,
-            inp,
-            cached,
-            out,
-            reasoning,
-            _cost(settings, inp, out),
-        )
         try:
             result = _postprocess(_parse(response), data, sent_ids)
         except _TokenLimit:
