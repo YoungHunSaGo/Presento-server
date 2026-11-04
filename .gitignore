@@ -13,3 +13,6 @@ build/
 
 # 얼굴 사진 픽스처는 개인 사진이라 커밋하지 않는다(README 참고)
 tests/fixtures/faces/
+
+# 샘플 영상·결과(개인 영상이라 커밋하지 않는다)
+samples/
