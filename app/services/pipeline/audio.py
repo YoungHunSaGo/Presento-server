@@ -16,11 +16,15 @@
 - FFmpegUnavailable: ffmpeg 없음·시간 초과(서버 문제) → INTERNAL_ERROR
 """
 
+import json
 import logging
 import re
 import subprocess  # noqa: S404 - 고정된 인자 목록으로만 실행한다
+import threading
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from app.services.media import DEMUXERS, MediaError
 
@@ -34,6 +38,8 @@ MIN_FPS = 1.0
 MAX_FPS = 2.0
 MAX_FRAME_SIDE = 640  # MediaPipe에 넣기 전 긴 변을 이 크기 이하로 줄인다(키우지는 않음)
 JPEG_QUALITY = 3  # ffmpeg -q:v (2~31, 낮을수록 고화질)
+# iter_frames가 한 장씩 메모리로 받는 원본 프레임의 최대 픽셀 수(8K 정도). 넘으면 깨진 파일로 본다.
+MAX_DECODE_PIXELS = 7680 * 4320
 
 # 워커 동시 실행(--concurrency)끼리 코어를 다투지 않도록 ffmpeg 스레드 수를 제한한다.
 FFMPEG_THREADS = 2
@@ -265,3 +271,150 @@ def sample_frames(
         raise MediaError("no frames could be decoded")
     _check_coverage("frames", frames[-1].timestamp + 1 / fps, target)
     return frames
+
+
+@dataclass(frozen=True)
+class DecodedFrame:
+    timestamp: float  # 영상 시작부터의 초
+    rgb: Any  # numpy uint8 배열 (높이, 너비, 3). 원본 해상도(회전 반영)
+
+
+def _video_size(src: str, demuxer: str, timeout: float) -> tuple[int, int]:
+    """회전을 반영한 영상 크기(너비, 높이)."""
+    args = [
+        "ffprobe", "-v", "error", "-protocol_whitelist", "file", "-f", demuxer,
+        "-select_streams", "V:0",
+        "-show_entries", "stream=width,height:stream_side_data=rotation",
+        "-of", "json", f"file:{src}",
+    ]  # fmt: skip
+    res = _exec(args, timeout)
+    if res.returncode != 0:
+        raise MediaError(res.stderr.replace(src, "<path>").strip()[:_STDERR_MAX])
+    try:
+        streams = json.loads(res.stdout or "{}").get("streams") or []
+    except json.JSONDecodeError:
+        raise MediaError("ffprobe output is not json") from None
+    if not streams:
+        raise NoVideoStream("no video stream")
+    try:
+        w, h = int(streams[0]["width"]), int(streams[0]["height"])
+    except (KeyError, TypeError, ValueError):
+        raise MediaError("video size unknown") from None
+    rotation = 0
+    for sd in streams[0].get("side_data_list") or []:
+        if "rotation" in sd:
+            try:
+                rotation = int(float(sd["rotation"]))
+            except (TypeError, ValueError):
+                rotation = 0
+    if abs(rotation) % 180 == 90:  # ffmpeg가 출력 때 회전을 반영하므로 가로·세로가 바뀐다
+        w, h = h, w
+    if w <= 0 or h <= 0 or w * h > MAX_DECODE_PIXELS:
+        raise MediaError(f"unsupported video size {w}x{h}")
+    return w, h
+
+
+def _read_exact(stream, n: int) -> bytes | None:
+    """n바이트를 다 읽으면 그 바이트, 스트림이 끝나 모자라면 None."""
+    chunks: list[bytes] = []
+    remaining = n
+    while remaining:
+        chunk = stream.read(remaining)
+        if not chunk:
+            return None
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def iter_frames(
+    source: Path,
+    content_type: str,
+    *,
+    fps: float = MIN_FPS,
+    max_seconds: float | None = None,
+    expected_duration: float | None = None,
+    timeout: float | None = None,
+) -> Iterator[DecodedFrame]:
+    """초당 fps장을 원본 해상도 RGB 배열로 한 장씩 돌려준다(디스크에 저장하지 않음).
+
+    얼굴처럼 작은 대상을 원본에서 잘라 보려고 쓴다. ffmpeg가 rawvideo를 파이프로 내보내고,
+    한 번에 한 장만 메모리에 둔다(1080p 약 6MB). 마지막 장을 돌려준 뒤 ffmpeg 오류·잘린 파일을
+    확인해 예외를 낸다(sample_frames와 같은 구분: NoVideoStream / MediaError / FFmpegUnavailable).
+    타임스탬프는 n번째 장 = n / fps(fps 필터의 출력 순서). 시작 시각이 0보다 앞선 영상은
+    sample_frames(음수 pts 프레임을 버림)와 첫 장이 한 장 어긋날 수 있다.
+    """
+    if not MIN_FPS <= fps <= MAX_FPS:
+        raise ValueError(f"fps must be between {MIN_FPS:g} and {MAX_FPS:g}")
+    import numpy as np
+
+    base, src = _input_args(source, content_type)
+    limit = _limit_args(max_seconds)
+    target = _target_seconds(expected_duration, max_seconds)
+    timeout = _timeout_for(timeout, target, max_seconds)
+    width, height = _video_size(src, DEMUXERS[content_type], min(timeout, TIMEOUT_BASE_SEC))
+    frame_bytes = width * height * 3
+    args = [
+        *base, *limit,
+        "-map", "0:V:0", "-an", "-sn", "-dn",
+        # 크기를 못 박아 둔다. ffprobe가 크기·회전을 잘못 알려도 읽는 단위가 어긋나지 않는다.
+        "-vf", f"fps={fps:g},scale={width}:{height}",
+        "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
+    ]  # fmt: skip
+    try:
+        proc = subprocess.Popen(  # noqa: S603 - 셸 없이 고정 인자로 실행
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+    except FileNotFoundError:
+        logger.warning("ffmpeg is not installed")
+        raise FFmpegUnavailable("ffmpeg not installed") from None
+    stdout, stderr_pipe = proc.stdout, proc.stderr
+    if stdout is None or stderr_pipe is None:  # PIPE로 열었으므로 생기지 않는다
+        proc.kill()
+        raise FFmpegUnavailable("ffmpeg pipes unavailable")
+
+    err_parts: list[bytes] = []
+
+    def drain_stderr() -> None:  # 파이프가 차서 ffmpeg가 멈추지 않게 계속 비운다
+        for line in stderr_pipe:
+            if sum(map(len, err_parts)) < 64_000:
+                err_parts.append(line)
+
+    state = {"timed_out": False}
+
+    def kill() -> None:
+        state["timed_out"] = True
+        proc.kill()
+
+    drainer = threading.Thread(target=drain_stderr, daemon=True)
+    drainer.start()
+    timer = threading.Timer(timeout, kill)
+    timer.start()
+    count = 0
+    try:
+        while (buf := _read_exact(stdout, frame_bytes)) is not None:
+            rgb = np.frombuffer(buf, dtype=np.uint8).reshape(height, width, 3)
+            yield DecodedFrame(timestamp=count / fps, rgb=rgb)
+            count += 1
+        proc.wait()
+    finally:
+        timer.cancel()
+        if proc.poll() is None:  # 소비자가 중간에 멈춘 경우
+            proc.kill()
+            proc.wait()
+        drainer.join(timeout=5)
+        stdout.close()
+        stderr_pipe.close()
+
+    # 정상 종료 직후 타이머가 울린 경우(경합)는 시간 초과로 보지 않는다.
+    if state["timed_out"] and proc.returncode != 0:
+        logger.warning("ffmpeg timed out after %.0fs", timeout)
+        raise FFmpegUnavailable("ffmpeg timed out")
+    if proc.returncode != 0:
+        stderr = b"".join(err_parts).decode("utf-8", "replace").strip().replace(src, "<path>")
+        if _MISSING_STREAM.search(stderr):
+            raise NoVideoStream(stderr[:_STDERR_MAX])
+        raise MediaError(stderr[:_STDERR_MAX])
+    if count == 0:
+        raise MediaError("no frames could be decoded")
+    _check_coverage("frames", count / fps, target)

@@ -17,6 +17,7 @@ from app.services.pipeline import nonverbal as nv
 from app.services.pipeline.audio import SampledFrame
 from app.services.pipeline.nonverbal import (
     FrameObs,
+    HeadTurn,
     NoFaceDetected,
     NonverbalUnavailable,
     PoseObs,
@@ -164,13 +165,43 @@ def test_gaze_away_run_at_end():
 # ---------- 얼굴 없이 자세만 잡힌 프레임 ----------
 
 
-def test_pose_only_frames_count_as_gaze_away():
-    # 정면 6장 + 얼굴 없이 어깨만 잡힌 4장 → 분모 10, 정면 6
-    frames = still(6) + [frame(6 + i, yaw=None, pitch=None, p=pose()) for i in range(4)]
+def turned(t: float, turn: HeadTurn | None) -> FrameObs:
+    """얼굴은 못 찾고 자세만 잡힌 프레임(Pose로 추정한 고개 방향)."""
+    return FrameObs(t=t, yaw=None, pitch=None, pose=pose(), head_turn=turn)
+
+
+def test_face_missing_but_clearly_turned_counts_as_away():
+    # 정면 6장 + 얼굴 없이 Pose로 확실히 돌린 4장 → 분모 10, 정면 6
+    frames = still(6) + [turned(6 + i, HeadTurn.AWAY) for i in range(4)]
     r = analyze_nonverbal(frames)
     assert r.metrics.gaze_front_ratio == 0.6
     assert ranges(r.gaze_away_ranges) == [(6.0, 10.0)]
     assert r.metrics.low_confidence_ranges == []
+
+
+def test_face_missing_with_frontal_pose_counts_as_front():
+    # 얼굴 각도로 벗어남 4장 + 얼굴 없이 Pose로는 정면 6장 → 분모 10, 정면 6
+    frames = [frame(i, yaw=40) for i in range(4)] + [
+        turned(4 + i, HeadTurn.FRONT) for i in range(6)
+    ]
+    r = analyze_nonverbal(frames)
+    assert r.metrics.gaze_front_ratio == 0.6
+    assert ranges(r.gaze_away_ranges) == [(0.0, 4.0)]
+
+
+def test_pose_only_mixed_front_and_away_is_not_biased():
+    # 얼굴을 한 번도 못 찾은 먼 화자: Pose 정면 7장 + 돌림 3장 → 0.7(정면을 빼면 0.0이 됨)
+    frames = [turned(i, HeadTurn.FRONT) for i in range(7)]
+    frames += [turned(7 + i, HeadTurn.AWAY) for i in range(3)]
+    assert analyze_nonverbal(frames).metrics.gaze_front_ratio == 0.7
+
+
+def test_face_missing_with_ambiguous_pose_is_unmeasured():
+    frames = still(6) + [turned(6 + i, None) for i in range(4)]
+    r = analyze_nonverbal(frames)
+    assert r.metrics.gaze_front_ratio == 1.0
+    assert r.gaze_away_ranges == []
+    assert r.metrics.low_confidence_ranges == []  # 자세는 잡혔으므로 저신뢰 구간은 아님
 
 
 def test_frames_without_face_and_pose_are_excluded():
@@ -183,18 +214,40 @@ def test_frames_without_face_and_pose_are_excluded():
 
 
 def test_gaze_away_run_mixes_turned_face_and_pose_only():
-    # 각도로 벗어남 2초 + 얼굴 없이 자세만 2초가 이어지면 하나의 4초 구간
+    # 각도로 벗어남 2초 + 얼굴 없이 Pose로 돌림 2초가 이어지면 하나의 4초 구간
     frames = still(5) + [frame(5 + i, yaw=40) for i in range(2)]
-    frames += [frame(7 + i, yaw=None, pitch=None, p=pose()) for i in range(2)]
+    frames += [turned(7 + i, HeadTurn.AWAY) for i in range(2)]
     frames += still(5, start=9)
     assert ranges(analyze_nonverbal(frames).gaze_away_ranges) == [(5.0, 9.0)]
 
 
-def test_no_face_rule_still_counts_face_frames_only():
-    # 자세만 잡힌 프레임이 많아도 얼굴 프레임이 20% 미만이면 NO_FACE_DETECTED
-    frames = still(1) + [frame(1 + i, yaw=None, pitch=None, p=pose()) for i in range(9)]
+def test_only_frontal_pose_frames_are_not_no_face():
+    # 얼굴은 한 번도 못 찾았지만 Pose로 고개 방향은 다 알았다 → NO_FACE 아님
+    r = analyze_nonverbal([turned(i, HeadTurn.FRONT) for i in range(20)])
+    assert r.metrics.gaze_front_ratio == 1.0
+    assert r.face_frame_ratio == 0.0
+
+
+def test_turned_around_without_pose_obs_is_not_low_confidence():
+    # 뒤돌아 코가 안 보여 pose는 None이지만 Pose로 AWAY → 시선 벗어남, 저신뢰 구간 아님
+    back = [
+        FrameObs(t=3 + i, yaw=None, pitch=None, pose=None, head_turn=HeadTurn.AWAY)
+        for i in range(4)
+    ]
+    r = analyze_nonverbal(still(3) + back + still(3, start=7))
+    assert r.metrics.low_confidence_ranges == []
+    assert ranges(r.gaze_away_ranges) == [(3.0, 7.0)]
+
+
+def test_no_face_when_head_unknown_in_80_percent():
+    assert nv.MAX_UNKNOWN_HEAD_RATIO == 0.8
+    # 얼굴 없음·Pose 애매 8장 + 정면 2장 → 80% → NO_FACE_DETECTED
+    frames = still(2) + [turned(2 + i, None) for i in range(8)]
     with pytest.raises(NoFaceDetected):
         analyze_nonverbal(frames)
+    # 7장이면 70% → 통과
+    frames = still(3) + [turned(3 + i, None) for i in range(7)]
+    assert analyze_nonverbal(frames).face_frame_ratio == 0.3
 
 
 # ---------- 얼굴 신뢰도 ----------
@@ -221,11 +274,12 @@ def test_low_confidence_threshold_inclusive():
     assert ranges(analyze_nonverbal(frames).metrics.low_confidence_ranges) == [(2.0, 4.0)]
 
 
-@pytest.mark.parametrize(("faces", "ok"), [(1, False), (2, True)])
-def test_no_face_detected_below_20_percent(faces, ok):
+@pytest.mark.parametrize(("faces", "ok"), [(2, False), (3, True)])
+def test_no_face_detected_when_80_percent_unknown(faces, ok):
+    # 얼굴·자세가 둘 다 없는 프레임도 "고개 방향을 모르는" 프레임이다
     frames = still(faces) + [frame(faces + i, yaw=None, pitch=None) for i in range(10 - faces)]
     if ok:
-        assert analyze_nonverbal(frames).face_frame_ratio == 0.2
+        assert analyze_nonverbal(frames).face_frame_ratio == 0.3
     else:
         with pytest.raises(NoFaceDetected):
             analyze_nonverbal(frames)
@@ -648,3 +702,295 @@ def test_mediapipe_side_face_is_away():
     assert nv._is_away(o)
     if o.has_face:
         assert 25 <= abs(o.yaw) <= 60  # type: ignore[arg-type]
+
+
+# ---------- 머리 영역 자르기·Pose 고개 방향(순수 함수) ----------
+
+VIS = 0.99
+
+
+def lm(x, y, v=VIS):
+    return (x, y, v)
+
+
+def test_head_crop_box_small_face_far_away():
+    # 1920×1080, 사람이 멀리 서 있음: 어깨 너비 0.08(154px) → 한 변 약 184px 정사각형
+    head = [lm(0.50, 0.30), lm(0.49, 0.29), lm(0.51, 0.29), lm(0.48, 0.30), lm(0.52, 0.30)]
+    box = nv.head_crop_box(head, lm(0.54, 0.40), lm(0.46, 0.40), 1920, 1080)
+    assert box is not None
+    x0, y0, x1, y1 = box
+    side = 0.08 * 1920 * nv.FACE_CROP_SCALE
+    assert x1 - x0 == pytest.approx(side, abs=2) and y1 - y0 == pytest.approx(side, abs=2)
+    assert (x0 + x1) / 2 == pytest.approx(0.5 * 1920, abs=1)
+    assert (y0 + y1) / 2 == pytest.approx(0.296 * 1080, abs=2)  # 코·눈·귀 평균
+
+
+def test_head_crop_box_is_clipped_to_screen():
+    # 머리가 화면 왼쪽 위 모서리에 걸침 → 화면 안으로 잘라 맞춘다(정사각형이 아니게 됨)
+    head = [lm(0.02, 0.03)]
+    x0, y0, x1, y1 = nv.head_crop_box(head, lm(0.12, 0.2), lm(-0.08, 0.2), 1000, 800)
+    assert (x0, y0) == (0, 0)
+    assert x1 == round(20 + 0.2 * 1000 * 1.2 / 2) and y1 == round(24 + 120)
+    assert x1 <= 1000 and y1 <= 800
+
+
+def test_head_crop_box_mostly_outside_is_none():
+    head = [lm(1.05, 0.5)]  # 머리 중심이 화면 오른쪽 밖
+    assert nv.head_crop_box(head, lm(1.08, 0.6), lm(1.02, 0.6), 1000, 800) is None
+
+
+@pytest.mark.parametrize(
+    ("head", "ls", "rs"),
+    [
+        ([lm(0.5, 0.3, 0.2)], lm(0.55, 0.4), lm(0.45, 0.4)),  # 머리 점이 안 보임
+        ([lm(0.5, 0.3)], lm(0.55, 0.4, 0.1), lm(0.45, 0.4)),  # 어깨가 안 보임
+        ([lm(0.5, 0.3)], lm(0.501, 0.4), lm(0.5, 0.4)),  # 어깨 너비가 너무 작음(48px 미만)
+    ],
+)
+def test_head_crop_box_none_cases(head, ls, rs):
+    assert nv.head_crop_box(head, ls, rs, 1920, 1080) is None
+
+
+@pytest.mark.parametrize(
+    ("nose", "le", "re_", "body", "expected"),
+    [
+        (lm(0.50, 0.3), lm(0.46, 0.3), lm(0.54, 0.3), True, HeadTurn.FRONT),  # 코가 가운데
+        (lm(0.512, 0.3), lm(0.46, 0.3), lm(0.54, 0.3), True, HeadTurn.FRONT),  # 0.15
+        (lm(0.52, 0.3), lm(0.46, 0.3), lm(0.54, 0.3), True, None),  # 0.25: 애매
+        (lm(0.528, 0.3), lm(0.46, 0.3), lm(0.54, 0.3), True, HeadTurn.AWAY),  # 0.35
+        (lm(0.58, 0.3), lm(0.46, 0.3), lm(0.54, 0.3), True, HeadTurn.AWAY),  # 귀 바깥
+        (lm(0.55, 0.3), lm(0.50, 0.3), lm(0.50, 0.3, 0.1), True, HeadTurn.AWAY),  # 옆모습
+        (lm(0.55, 0.3), lm(0.50, 0.3), lm(0.50, 0.3, 0.3), True, None),  # 귀가 반쯤: 애매
+        (lm(0.5, 0.3, 0.1), lm(0.46, 0.3), lm(0.54, 0.3), True, HeadTurn.AWAY),  # 뒤돌아섬
+        (lm(0.5, 0.3, 0.1), lm(0.46, 0.3), lm(0.54, 0.3), False, None),  # 몸도 안 보임
+        (lm(0.5, 0.3, 0.3), lm(0.46, 0.3), lm(0.54, 0.3), True, None),  # 코가 애매
+        (lm(0.5, 0.3), lm(0.5, 0.3), lm(0.5, 0.3), True, None),  # 귀 거리 0
+        (lm(0.5, -0.05, 0.1), lm(0.46, 0.0), lm(0.54, 0.0), True, None),  # 머리가 화면 위로 잘림
+        (lm(0.5, 0.3), lm(-0.02, 0.3), lm(0.04, 0.3, 0.1), True, None),  # 귀가 화면 밖
+    ],
+)
+def test_estimate_head_turn(nose, le, re_, body, expected):
+    assert nv.estimate_head_turn(nose, le, re_, body) is expected
+
+
+# ---------- _Observer: 가짜 Pose/Face 랜드마커로 자르기 흐름 확인 ----------
+
+
+def _pose_landmarks(points: dict[int, tuple[float, float, float]]):
+    from types import SimpleNamespace
+
+    base = [SimpleNamespace(x=0.5, y=0.9, visibility=0.0) for _ in range(33)]
+    for i, (x, y, v) in points.items():
+        base[i] = SimpleNamespace(x=x, y=y, visibility=v)
+    return base
+
+
+FAR_SPEAKER = {  # 1920×1080에서 멀리 선 사람(어깨 너비 0.08)
+    0: lm(0.50, 0.30), 2: lm(0.49, 0.29), 5: lm(0.51, 0.29), 7: lm(0.48, 0.30),
+    8: lm(0.52, 0.30), 11: lm(0.54, 0.40), 12: lm(0.46, 0.40),
+    15: lm(0.56, 0.6), 16: lm(0.44, 0.6),
+}  # fmt: skip
+
+
+class FakeLandmarkers:
+    def __init__(self, pose_points, face_found=True):
+        from types import SimpleNamespace
+
+        import numpy as np
+
+        self.pose_inputs: list[tuple[int, int]] = []
+        self.face_inputs = []
+        self.pose_points = pose_points
+        self.face_found = face_found
+        ident = np.eye(4)
+        ident[2, 3] = -50.0
+        self.pose = SimpleNamespace(detect_for_video=self._pose)
+        self.face = SimpleNamespace(detect=self._face, close=lambda: None)
+        self.pose.close = lambda: None
+        self._matrix = ident
+
+    def _pose(self, img, ts):
+        from types import SimpleNamespace
+
+        self.pose_inputs.append(img.shape[:2])
+        lms = [_pose_landmarks(self.pose_points)] if self.pose_points else []
+        return SimpleNamespace(pose_landmarks=lms)
+
+    def _face(self, img):
+        from types import SimpleNamespace
+
+        self.face_inputs.append(img)
+        if not self.face_found:
+            return SimpleNamespace(face_landmarks=[], facial_transformation_matrixes=[])
+        return SimpleNamespace(face_landmarks=[[0]], facial_transformation_matrixes=[self._matrix])
+
+
+def make_observer(fake: FakeLandmarkers):
+    from types import SimpleNamespace
+
+    import cv2
+    import numpy as np
+
+    obs = object.__new__(nv._Observer)
+    obs._cv2, obs._np = cv2, np
+    obs._mp = SimpleNamespace(
+        Image=lambda image_format, data: data, ImageFormat=SimpleNamespace(SRGB=1)
+    )
+    obs._pose, obs._face, obs._last_ms = fake.pose, fake.face, -1
+    return obs
+
+
+def full_frame(w=1920, h=1080):
+    import numpy as np
+
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    rgb[:, :, 0] = np.arange(w, dtype=np.uint32)[None, :] % 256  # 위치를 알 수 있게 무늬
+    rgb[:, :, 1] = np.arange(h, dtype=np.uint32)[:, None] % 256
+    return rgb
+
+
+def test_observer_small_face_uses_crop_from_full_resolution():
+    fake = FakeLandmarkers(FAR_SPEAKER)
+    o = make_observer(fake).observe(1.0, full_frame())
+    assert fake.pose_inputs == [(360, 640)]  # 자세는 640px로 줄인 이미지
+    (face_img,) = fake.face_inputs
+    assert max(face_img.shape[:2]) == nv.FACE_CROP_INPUT_PX  # 머리 영역을 256px로
+    assert face_img.shape[0] == face_img.shape[1]  # 정사각형
+    assert o.has_face and o.yaw == pytest.approx(0.0) and o.pitch == pytest.approx(0.0)
+    assert o.pose is not None and o.head_turn is HeadTurn.FRONT
+
+
+def test_observer_face_missing_with_frontal_pose():
+    fake = FakeLandmarkers(FAR_SPEAKER, face_found=False)
+    o = make_observer(fake).observe(1.0, full_frame())
+    assert not o.has_face and o.head_turn is HeadTurn.FRONT
+    r = analyze_nonverbal([o] + still(4, start=2))
+    assert r.metrics.gaze_front_ratio == 1.0  # 이 프레임은 분모에서 빠짐
+
+
+def test_observer_face_missing_with_turned_pose():
+    turned_points = {**FAR_SPEAKER, 0: lm(0.535, 0.30), 8: lm(0.52, 0.30, 0.05)}  # 옆모습
+    fake = FakeLandmarkers(turned_points, face_found=False)
+    o = make_observer(fake).observe(1.0, full_frame())
+    assert not o.has_face and o.head_turn is HeadTurn.AWAY
+    r = analyze_nonverbal([o] + still(4, start=2))
+    assert r.metrics.gaze_front_ratio == 0.8  # 분모에 들어가 시선 벗어남으로 셈
+
+
+def test_observer_crop_outside_screen_is_clipped():
+    edge = {
+        0: lm(0.02, 0.05), 7: lm(0.0, 0.05), 8: lm(0.04, 0.05),
+        11: lm(0.12, 0.2), 12: lm(-0.06, 0.2),
+    }  # fmt: skip
+    fake = FakeLandmarkers(edge)
+    make_observer(fake).observe(1.0, full_frame(1000, 800))
+    (face_img,) = fake.face_inputs
+    h, w = face_img.shape[:2]
+    assert max(h, w) == nv.FACE_CROP_INPUT_PX and h != w  # 잘려서 정사각형이 아님
+    assert int(face_img[0, 0, 0]) == 0 and int(face_img[0, 0, 1]) == 0  # 원본 왼쪽 위에서 시작
+
+
+def test_observer_without_shoulders_searches_whole_small_frame():
+    fake = FakeLandmarkers({0: lm(0.5, 0.4)})  # 근접 촬영: 어깨가 안 보임
+    o = make_observer(fake).observe(1.0, full_frame())
+    (face_img,) = fake.face_inputs
+    assert face_img.shape[:2] == (360, 640)
+    assert o.pose is None and o.has_face
+
+
+def test_observer_no_pose_at_all():
+    fake = FakeLandmarkers({}, face_found=False)
+    o = make_observer(fake).observe(1.0, full_frame())
+    assert o.pose is None and o.head_turn is None and not o.head_known
+
+
+def test_observe_video_passes_media_errors_through(tmp_path, monkeypatch):
+    from app.services.media import MediaError
+
+    monkeypatch.setattr(nv, "_check_models", lambda *a: None)
+
+    class Dummy:
+        def __init__(self, *a):
+            pass
+
+        def observe(self, t, rgb):
+            return FrameObs(t=t, yaw=0.0, pitch=0.0, pose=None)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(nv, "_Observer", Dummy)
+
+    def broken(*a, **kw):
+        yield nv.audio.DecodedFrame(0.0, full_frame(64, 48))
+        raise MediaError("truncated")
+
+    with pytest.raises(MediaError):
+        nv.observe_video(
+            tmp_path / "v.mp4", "video/mp4", tmp_path / "f", tmp_path / "p", frames=broken
+        )
+
+    def ok(*a, **kw):
+        for i in range(3):
+            yield nv.audio.DecodedFrame(float(i), full_frame(64, 48))
+
+    obs = nv.observe_video(
+        tmp_path / "v.mp4", "video/mp4", tmp_path / "f", tmp_path / "p", frames=ok
+    )
+    assert [o.t for o in obs] == [0.0, 1.0, 2.0]
+
+
+@needs_models
+@needs_ffmpeg
+def test_observe_video_real_mediapipe_on_blank_video(tmp_path):
+    video = tmp_path / "blank.mp4"
+    ffmpeg = shutil.which("ffmpeg")
+    subprocess.run(  # noqa: S603 - 고정 인자
+        [
+            ffmpeg,
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=gray:s=640x360:d=3",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(video),
+        ],  # fmt: skip
+        check=True,
+    )
+    obs = nv.observe_video(video, "video/mp4", Path(FACE_MODEL), Path(POSE_MODEL), fps=1.0)
+    assert len(obs) == 3 and all(not o.has_face and o.pose is None for o in obs)
+
+
+def test_observe_video_closes_frame_generator_when_mediapipe_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(nv, "_check_models", lambda *a: None)
+    closed = {"value": False}
+
+    class Boom:
+        def __init__(self, *a):
+            pass
+
+        def observe(self, t, rgb):
+            raise RuntimeError("mediapipe crashed")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(nv, "_Observer", Boom)
+
+    def frames(*a, **kw):
+        try:
+            for i in range(100):
+                yield nv.audio.DecodedFrame(float(i), full_frame(64, 48))
+        finally:
+            closed["value"] = True  # iter_frames는 여기서 ffmpeg·타이머를 정리한다
+
+    with pytest.raises(NonverbalUnavailable):
+        nv.observe_video(
+            tmp_path / "v.mp4", "video/mp4", tmp_path / "f", tmp_path / "p", frames=frames
+        )
+    assert closed["value"]

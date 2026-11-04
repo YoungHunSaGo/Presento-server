@@ -3,7 +3,7 @@
 단계(명세 6장 stage·progress):
 - EXTRACTING_AUDIO 0~10: 영상 길이 확인(10분 초과 VIDEO_TOO_LONG), 영상 내려받기·해시, 음성 추출
 - TRANSCRIBING 10~40: whisper-1 받아쓰기 → 말하기 지표
-- ANALYZING_NONVERBAL 40~65: 프레임 샘플링 → MediaPipe → 비언어 지표
+- ANALYZING_NONVERBAL 40~65: 원본 프레임(초당 1장) → MediaPipe(자세 640px, 얼굴은 머리 영역) → 지표
 - ANALYZING_CONTENT 65~80: 슬라이드 텍스트(있으면) → LLM 내용 분석
 - GENERATING_FEEDBACK 80~100: 점수(코드) → LLM 피드백 → 리포트 조립·검증·저장
 
@@ -77,7 +77,7 @@ from app.services.storage import Storage, StorageError
 logger = logging.getLogger(__name__)
 
 # 알고리즘·프롬프트·기준값을 바꾸면 올린다. 바뀐 버전의 결과는 재사용하지 않는다.
-PIPELINE_VERSION = "1"
+PIPELINE_VERSION = "2"  # 2: 얼굴을 머리 영역 잘라 찾기, Pose 고개 방향 추정
 FRAME_FPS = 1.0
 _HASH_CHUNK = 1024 * 1024
 WORKDIR_PREFIX = "presento-"
@@ -118,9 +118,8 @@ class PipelineDeps:
     stt_client: Callable[[], SttClient]
     llm_client: Callable[[], LlmClient]
     extract_audio: Callable[..., Path] = audio.extract_audio
-    sample_frames: Callable[..., list[audio.SampledFrame]] = audio.sample_frames
     transcribe: Callable[..., stt.SttResult] = stt.transcribe
-    observe_frames: Callable[..., list[nonverbal.FrameObs]] = nonverbal.observe_frames
+    observe_video: Callable[..., list[nonverbal.FrameObs]] = nonverbal.observe_video
     extract_slides: Callable[[Path], list[str] | None] = content.extract_slide_texts
     analyze_content: Callable[..., content.ContentAnalysis] = content.analyze_content
     generate_feedback: Callable[..., feedback.FeedbackResult] = feedback.generate_feedback
@@ -317,14 +316,15 @@ def _execute(
 
     # ---- ANALYZING_NONVERBAL 40~65
     set_progress(db, aid, AnalysisStage.ANALYZING_NONVERBAL, 40)
-    frames = deps.sample_frames(
-        video, tmp / "frames", ctype, fps=FRAME_FPS, max_seconds=max_sec, expected_duration=duration
-    )
-    set_progress(db, aid, AnalysisStage.ANALYZING_NONVERBAL, 50)
-    obs = deps.observe_frames(
-        frames,
+    # 원본 해상도 프레임을 한 장씩 메모리로 받아 자세(640px)·얼굴(머리 영역 잘라 냄)을 본다.
+    obs = deps.observe_video(
+        video,
+        ctype,
         Path(settings.mediapipe_face_model_path),
         Path(settings.mediapipe_pose_model_path),
+        fps=FRAME_FPS,
+        max_seconds=max_sec,
+        expected_duration=duration,
     )
     nv = nonverbal.analyze_nonverbal(obs, duration_sec=duration)
 

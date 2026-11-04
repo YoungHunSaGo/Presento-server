@@ -12,7 +12,6 @@ from app.models.enums import ScoreCategory
 from app.schemas.report import Feedback, FeedbackType, Severity
 from app.services.media import MediaError
 from app.services.pipeline import audio, runner
-from app.services.pipeline.audio import SampledFrame
 from app.services.pipeline.content import (
     ContentAnalysis,
     ContentIssue,
@@ -69,13 +68,10 @@ class Steps:
         self._record("transcribe")
         return normalize(WHISPER)
 
-    def sample_frames(self, video, out_dir, ctype, **kw):
-        self._record("sample_frames")
-        return [SampledFrame(path=out_dir / f"{i}.jpg", timestamp=float(i)) for i in range(15)]
-
-    def observe_frames(self, frames, face, pose_path):
-        self._record("observe_frames")
-        return [FrameObs(t=f.timestamp, yaw=0.0, pitch=0.0, pose=pose()) for f in frames]
+    def observe_video(self, video, ctype, face, pose_path, **kw):
+        self.video_kwargs = kw
+        self._record("observe_video")
+        return [FrameObs(t=float(i), yaw=0.0, pitch=0.0, pose=pose()) for i in range(15)]
 
     def extract_slides(self, path):
         self.slides_paths.append(path)
@@ -129,8 +125,8 @@ def world(app, db, storage, settings, tmp_path):
     deps = runner.PipelineDeps(
         storage=storage, settings=settings, probe=probe, stt_client=stt_client,
         llm_client=llm_client, extract_audio=steps.extract_audio,
-        sample_frames=steps.sample_frames, transcribe=steps.transcribe,
-        observe_frames=steps.observe_frames, extract_slides=steps.extract_slides,
+        transcribe=steps.transcribe,
+        observe_video=steps.observe_video, extract_slides=steps.extract_slides,
         analyze_content=steps.analyze_content, generate_feedback=steps.generate_feedback,
     )  # fmt: skip
 
@@ -243,10 +239,11 @@ def test_slides_download_failure_continues_without_slides(world):
         ("extract_audio", audio.NoAudioStream("x"), "NO_SPEECH_DETECTED"),
         ("transcribe", NoSpeechDetected("x"), "NO_SPEECH_DETECTED"),
         ("transcribe", SttServiceError("x"), "AI_SERVICE_ERROR"),
-        ("sample_frames", audio.NoVideoStream("x"), "NO_FACE_DETECTED"),
+        ("observe_video", audio.NoVideoStream("x"), "NO_FACE_DETECTED"),
+        ("observe_video", MediaError("x"), "CORRUPTED_VIDEO"),
         ("extract_audio", MediaError("x"), "CORRUPTED_VIDEO"),
         ("extract_audio", audio.FFmpegUnavailable("x"), "INTERNAL_ERROR"),
-        ("observe_frames", NonverbalUnavailable("x"), "INTERNAL_ERROR"),
+        ("observe_video", NonverbalUnavailable("x"), "INTERNAL_ERROR"),
         ("analyze_content", ContentServiceError("x"), "AI_SERVICE_ERROR"),
         ("generate_feedback", FeedbackServiceError("x"), "AI_SERVICE_ERROR"),
         ("generate_feedback", RuntimeError("boom"), "INTERNAL_ERROR"),
@@ -263,10 +260,9 @@ def test_module_errors_map_to_failure_codes(world, db, step, exc, code):
 
 
 def test_no_face_frames_fail_with_no_face(world, db):
-    world.steps.observe_frames = lambda frames, f, p: [
+    world.deps.observe_video = lambda video, ctype, f, p, **kw: [
         FrameObs(t=float(i), yaw=None, pitch=None, pose=None) for i in range(15)
     ]
-    world.deps.observe_frames = world.steps.observe_frames
     aid = world.make()
     assert world.run(aid) == "failed"
     assert _analysis(db, aid).error_code == "NO_FACE_DETECTED"
@@ -304,7 +300,7 @@ def test_temp_files_removed_on_success(world):
 
 
 def test_temp_files_removed_on_failure(world):
-    world.steps.raise_at["observe_frames"] = RuntimeError("boom")
+    world.steps.raise_at["observe_video"] = RuntimeError("boom")
     world.run(world.make())
     assert list(world.work.iterdir()) == []
 
@@ -540,7 +536,7 @@ def test_broken_stored_transcript_is_transcribed_again(world, db):
 def test_soft_time_limit_maps_to_internal_error(world, db):
     from celery.exceptions import SoftTimeLimitExceeded
 
-    world.steps.raise_at["observe_frames"] = SoftTimeLimitExceeded()
+    world.steps.raise_at["observe_video"] = SoftTimeLimitExceeded()
     aid = world.make()
     assert world.run(aid) == "failed"
     assert _analysis(db, aid).error_code == "INTERNAL_ERROR"
@@ -583,3 +579,12 @@ def test_progress_moves_after_probe(world):
     world.run(world.make())
     first_stage = world.steps.stages[0]
     assert first_stage == ("EXTRACTING_AUDIO", 5)  # 2(다운로드 전) → 5(재사용 확인 후)
+
+
+def test_observe_video_gets_video_and_limits(world):
+    world.run(world.make())
+    assert world.steps.video_kwargs == {
+        "fps": runner.FRAME_FPS,
+        "max_seconds": float(600),
+        "expected_duration": 30.0,
+    }

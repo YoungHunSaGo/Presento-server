@@ -456,3 +456,84 @@ def test_real_rotated_phone_video(tmp_path):
     (frame,) = sample_frames(src, tmp_path / "f", "video/mp4", fps=1)
     (stream,) = _probe(frame.path)["streams"]
     assert (stream["width"], stream["height"]) == (360, 640)
+
+
+# ---------- iter_frames: 원본 해상도 프레임을 메모리로 ----------
+
+
+@needs_ffmpeg
+def test_real_iter_frames_full_resolution_rgb(tmp_path):
+    src = _make_video(tmp_path / "v.mp4", seconds=3, size="1280x720")
+    frames = list(audio.iter_frames(src, "video/mp4", fps=1))
+    assert [f.timestamp for f in frames] == [0.0, 1.0, 2.0]
+    assert frames[0].rgb.shape == (720, 1280, 3)  # 줄이지 않은 원본
+    assert str(frames[0].rgb.dtype) == "uint8"
+
+
+@needs_ffmpeg
+def test_real_iter_frames_rotated_video(tmp_path):
+    raw = _make_video(tmp_path / "raw.mp4", seconds=1, size="1280x720")
+    src = tmp_path / "rotated.mp4"
+    _ffmpeg_make(["-display_rotation", "90", "-i", str(raw), "-c", "copy", str(src)])
+    (frame,) = list(audio.iter_frames(src, "video/mp4", fps=1))
+    assert frame.rgb.shape == (1280, 720, 3)  # 회전 반영(세로)
+
+
+@needs_ffmpeg
+def test_real_iter_frames_audio_only_is_no_video(tmp_path):
+    src = tmp_path / "a.mp4"
+    _ffmpeg_make(["-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-c:a", "aac", str(src)])
+    with pytest.raises(NoVideoStream):
+        list(audio.iter_frames(src, "video/mp4"))
+
+
+@needs_ffmpeg
+def test_real_iter_frames_corrupted(tmp_path):
+    src = tmp_path / "bad.mp4"
+    src.write_bytes(b"\x00" * 4096)
+    with pytest.raises(MediaError):
+        list(audio.iter_frames(src, "video/mp4"))
+
+
+@needs_ffmpeg
+def test_real_iter_frames_shorter_than_expected(tmp_path):
+    src = _make_video(tmp_path / "v.mp4", seconds=2)
+    with pytest.raises(MediaError):
+        list(audio.iter_frames(src, "video/mp4", expected_duration=30))
+
+
+@needs_ffmpeg
+def test_real_iter_frames_max_seconds(tmp_path):
+    src = _make_video(tmp_path / "v.mp4", seconds=5)
+    frames = list(audio.iter_frames(src, "video/mp4", fps=1, max_seconds=2))
+    assert len(frames) == 2
+
+
+@needs_ffmpeg
+def test_real_iter_frames_consumer_stops_early(tmp_path):
+    src = _make_video(tmp_path / "v.mp4", seconds=5)
+    gen = audio.iter_frames(src, "video/mp4", fps=1)
+    next(gen)
+    gen.close()  # ffmpeg를 정리하고 예외 없이 끝나야 한다
+
+
+def test_iter_frames_rejects_oversized_video(monkeypatch, video):
+    res = subprocess.CompletedProcess(
+        [], 0, stdout='{"streams":[{"width":20000,"height":20000}]}', stderr=""
+    )
+    monkeypatch.setattr(audio, "_run", lambda args, timeout: res)
+    with pytest.raises(MediaError):
+        list(audio.iter_frames(video, "video/mp4"))
+
+
+def test_iter_frames_rejects_bad_fps(video):
+    with pytest.raises(ValueError):
+        list(audio.iter_frames(video, "video/mp4", fps=5))
+
+
+@needs_ffmpeg
+def test_real_iter_frames_timeout_kills_ffmpeg(tmp_path):
+    src = _make_video(tmp_path / "v.mp4", seconds=3, size="1280x720")
+    gen = audio.iter_frames(src, "video/mp4", fps=1, timeout=0.001)
+    with pytest.raises(audio.FFmpegUnavailable):
+        list(gen)
