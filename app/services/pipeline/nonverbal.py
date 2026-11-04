@@ -29,10 +29,13 @@
   POSTURE_WINDOW_SEC 구간마다 직선 추세를 뺀 표준편차(흔들림)를 구한다.
   천천히 자리를 옮기는 것은 흔들림이 아니다. 프레임이 반 이상 찬 구간만 쓴다.
   흔들림 평균이 0이면 1점, POSTURE_SWAY_ZERO 이상이면 0점(선형).
-- 제스처(gesturePerMin): 연속 두 프레임 사이 손목이 어깨 너비(영상 전체 중앙값)의
-  GESTURE_MOVE_RATIO 이상 움직이면 움직임으로 본다. GESTURE_MERGE_SEC 안에 이어진 움직임은
-  한 번으로 세되, 한 번이 GESTURE_MAX_SEC를 넘게 이어지면 새로 센다(계속 움직이면 많이 센다).
-  손목이 보인 시간(분)으로 나눈다.
+- 제스처(gesturePerMin): 어깨 중심 기준 손목 좌표(몸 전체 흔들림·이동 제외)로
+  GESTURE_SPEED_SPAN_SEC(1초) 평균 속도(어깨 너비(영상 전체 중앙값)/초)를 구한다. 손목이 평소
+  위치에서 GESTURE_START_AWAY 이상 벗어나며 움직이면 제스처 1번(시작), 속도가 GESTURE_END_SPEED
+  미만으로 떨어지면 끝(시작·끝 기준이 다른 히스테리시스). 손을 든 채 오래 있어도 내리는 것은
+  새 동작이 아니다(시작 때 평소 위치를 기준점으로 고정). 계속 크게 움직이면 GESTURE_MAX_SEC마다
+  새로 센다. 손목이 보인 시간(분)으로 나눈다. 같은 영상도 플랫폼(ffmpeg 색 변환·MediaPipe 빌드)에
+  따라 랜드마크가 조금씩 달라 기준선 근처에서 횟수가 크게 흔들렸기 때문에 이렇게 판정한다.
 - 측정 불가: 자세가 잡힌 시간이 MIN_POSE_SEC 미만이면 posture_measured=False,
   손목이 보인 시간이 자세 시간의 MIN_WRIST_VISIBLE_RATIO 미만이면 gesture_measured=False
   (노트북 카메라는 보통 손이 안 보인다). 측정 불가 지표는 null로 돌려준다(명세 5장).
@@ -95,10 +98,28 @@ MIN_POSE_SEC = 10.0
 MIN_SHOULDER_WIDTH_RATIO = 0.06
 
 # ---- 제스처 ----
-WRIST_VISIBILITY_MIN = 0.5
-GESTURE_MOVE_RATIO = 0.25
-GESTURE_MERGE_SEC = 1.0
-GESTURE_MAX_SEC = 2.0  # 한 번의 제스처로 묶는 최대 길이
+# 손목이 가려졌을 때(연단 뒤 등) MediaPipe는 위치를 짐작하고 visibility를 0.5 언저리로 준다.
+# 그 짐작 위치는 플랫폼마다 크게 달라(실측: 같은 프레임에서 어깨 너비의 0.1~0.4) 제스처가
+# 흔들리므로, 확실히 보이는 손목만 쓴다. 손목이 거의 안 보이면 제스처는 측정 불가(null)가 된다.
+WRIST_VISIBILITY_MIN = 0.7
+# 손목 속도 = 이 길이(초) 동안의 변위 ÷ 시간. 프레임별 속도를 이 길이만큼 이동 평균한 것과 같다.
+# 랜드마크 떨림은 줄이고, 좌표 자체를 평균하지 않아 2fps에서 짧은 손동작의 꼭대기가 깎이지 않는다
+# (좌표 평균은 짧은 동작을 지워 정답 대비 정확도가 절반으로 떨어졌다).
+GESTURE_SPEED_SPAN_SEC = 1.0
+# 히스테리시스: 손목이 평소 위치(GESTURE_BASELINE_SEC 구간 중앙값)에서 어깨 너비의
+# GESTURE_START_AWAY 이상 벗어나 움직이면 제스처 시작, 속도가 GESTURE_END_SPEED 미만이면 끝.
+# 속도(위치의 차이)는 랜드마크 잡음을 키우므로 시작은 진폭으로 본다.
+GESTURE_BASELINE_SEC = 20.0  # 지난 이만큼(초)의 멈춘 프레임으로 평소 위치를 잡는다
+GESTURE_START_AWAY = 0.25
+# 시작(또는 다시 셈)에 필요한 1초 평균 속도(어깨 너비/초). 끝 기준(END)보다 높아서, 멈춘 손의
+# 랜드마크 떨림이 진폭 기준을 우연히 넘어도 속도까지 넘기는 어렵다.
+GESTURE_START_SPEED = 0.25
+GESTURE_END_SPEED = 0.15
+GESTURE_MAX_SEC = 3.0  # 크게 움직이는 상태가 이보다 길게 이어지면 새 제스처로 센다
+GESTURE_ANCHOR_MAX_SEC = 60.0  # 손을 든 채 이보다 오래 있으면 그 자리를 새 평소 위치로 본다
+# 손목·자세를 이만큼(초) 이하로 잠깐 놓친 것은 같은 흐름으로 본다(움직임 중 흐려져 놓쳐도
+# 다시 잡힌 손을 새 제스처로 세지 않게). 더 길면 상태를 처음부터 다시 본다.
+GESTURE_DROPOUT_SEC = 1.0
 MIN_WRIST_VISIBLE_RATIO = 0.3
 GESTURE_WINDOW_SEC = 30.0  # GESTURE_NONE/EXCESS 구간을 보는 단위
 GESTURE_EXCESS_PER_MIN = 20.0
@@ -368,29 +389,217 @@ def _posture(
 # ---------------------------------------------------------------- 제스처
 
 
-def _gesture_times(pose_frames: Sequence[FrameObs], dt: float, width: float) -> list[float]:
-    """제스처 시각(움직임이 끝난 프레임 시각)."""
-    moves: list[float] = []
-    for a, b in zip(pose_frames, pose_frames[1:], strict=False):
-        # 프레임이 빠져 간격이 벌어지면(얼굴·자세 놓침) 그 사이 움직임은 알 수 없다.
-        if b.t - a.t > dt * 1.5 + _EPS or a.pose is None or b.pose is None:
+def _point_speeds(
+    ts: list[float], pts: list[Point | None], width: float, segment: list[int], max_gap: float
+) -> list[float | None]:
+    """프레임마다 앞·뒤 프레임 중 느린 쪽과의 속도(어깨 너비/초). 같은 구간의 이웃
+    (간격 max_gap 이하)만 본다(오래 놓친 뒤의 프레임을 긴 간격으로 나눠 멈춘 것으로 보지 않게)."""
+    out: list[float | None] = []
+    for i, p in enumerate(pts):
+        speeds = [
+            _dist(pts[j], p) / width / abs(ts[j] - ts[i])
+            for j in (i - 1, i + 1)
+            if p is not None
+            and 0 <= j < len(pts)
+            and pts[j] is not None
+            and segment[j] == segment[i]
+            and 0 < abs(ts[j] - ts[i]) <= max_gap + _EPS
+        ]
+        out.append(min(speeds) if speeds else None)
+    return out
+
+
+def _baseline(
+    ts: list[float],
+    pts: list[Point | None],
+    span: float,
+    width: float,
+    segment: list[int],
+    max_gap: float,
+) -> list[Point | None]:
+    """평소(쉬는) 손 위치: 지난 span초(지금 포함) 동안 손이 멈춰 있던 점들의 좌표별 중앙값.
+
+    멈춤 = 앞 또는 뒤 프레임과의 속도가 GESTURE_END_SPEED 미만(한쪽만 봐도 되게 해 잠깐 쉬고
+    다시 움직이는 잦은 손동작에서도 평소 위치를 잡는다). 움직이는 중인 프레임을 빼야 손동작이
+    잦아도 평소 위치가 들린 쪽으로 밀리지 않고, 지난 구간만 봐야 손을 들어 올리는 순간 평소
+    위치가 미리 따라 올라가지 않는다.
+    지난 span초 동안 멈춘 적이 없으면 같은 구간의 이전 평소 위치를 쓰고, 그것도 없으면(구간이
+    움직이면서 시작) 그 구간에서 가장 느린 1/4 프레임의 중앙값을 쓴다(그 구간의 뒤 프레임도
+    보지만, 영상 전체를 받은 뒤 계산하므로 결과는 항상 같다).
+    """
+    speed = _point_speeds(ts, pts, width, segment, max_gap)
+    still = [v is not None and v < GESTURE_END_SPEED for v in speed]
+    fallback: dict[int, Point | None] = {}
+
+    def slowest(seg: int) -> Point | None:
+        if seg not in fallback:
+            idx = sorted(
+                (i for i in range(len(pts)) if segment[i] == seg and speed[i] is not None),
+                key=lambda i: speed[i],  # type: ignore[arg-type, return-value]
+            )
+            near = [pts[i] for i in idx[: max(1, len(idx) // 4)] if pts[i] is not None]
+            fallback[seg] = (
+                (statistics.median(p[0] for p in near), statistics.median(p[1] for p in near))
+                if near
+                else None
+            )
+        return fallback[seg]
+
+    out: list[Point | None] = []
+    last: Point | None = None
+    for i, t in enumerate(ts):
+        if i > 0 and segment[i] != segment[i - 1]:
+            last = None
+        if pts[i] is None:
+            out.append(None)
             continue
-        pairs = ((a.pose.left_wrist, b.pose.left_wrist), (a.pose.right_wrist, b.pose.right_wrist))
-        if any(
-            wa is not None and wb is not None and _dist(wa, wb) / width >= GESTURE_MOVE_RATIO - _EPS
-            for wa, wb in pairs
-        ):
-            moves.append(b.t)
+        # 같은 구간(프레임이 끊기지 않은 범위)의 지난 span초만 본다
+        near = [
+            pts[j]
+            for j in range(i + 1)
+            if still[j] and segment[j] == segment[i] and t - ts[j] <= span + _EPS
+        ]
+        if near:
+            last = (statistics.median(p[0] for p in near), statistics.median(p[1] for p in near))
+        elif last is None:
+            last = slowest(segment[i])
+        out.append(last)
+    return out
+
+
+def _gesture_times(pose_frames: Sequence[FrameObs], dt: float, width: float) -> list[float]:
+    """제스처 시각(움직임이 시작된 프레임 시각). 1초 평균 속도 + 진폭 히스테리시스.
+
+    - 시작: 손목이 평소 위치에서 GESTURE_START_AWAY 이상 벗어나 있고, 빠르게 움직이며(속도 ≥ START),
+      평소 위치에서 멀어지는 방향일 때(들고 있던 손을 내리는 것은 새 동작이 아님).
+    - 끝: 1초 평균 속도가 GESTURE_END_SPEED 미만(멈춤). 진폭과 상관없이 끝난다(손을 든 채 멈춰도
+      끝 → 손동작이 잦아도 상태가 "움직이는 중"에 갇히지 않는다).
+    - 다시 셈: 쉬지 않고 계속 크게 움직이면 GESTURE_MAX_SEC마다.
+    - 기준점: 제스처가 시작되면 그때의 평소 위치를 손목별로 고정하고, 손이 그 가까이
+      (GESTURE_START_AWAY의 절반 미만) 돌아오거나 GESTURE_ANCHOR_MAX_SEC가 지날 때까지 그 점으로
+      잰다(손을 오래 들고 있어 평소 위치가 옮겨 가도 내리는 손을 새 동작으로 세지 않게).
+    - 손목을 GESTURE_DROPOUT_SEC 이하로 놓친 것은 상태를 유지한다.
+    """
+    ts = [f.t for f in pose_frames]
+    segment: list[int] = []  # 자세를 오래 놓쳐 간격이 벌어질 때마다 새 구간
+    for k, t in enumerate(ts):
+        new = k > 0 and t - ts[k - 1] > GESTURE_DROPOUT_SEC + dt + _EPS
+        segment.append((segment[-1] + int(new)) if segment else 0)
+
+    # 어깨 중심(기준점)은 GESTURE_SPEED_SPAN_SEC 가운데 이동 평균. 몸통은 손보다 천천히 움직이므로
+    # 평균해도 손동작이 깎이지 않고, 어깨 랜드마크 떨림이 손목 위치에 더해지는 것을 줄인다.
+    centers: list[Point | None] = []
+    for k, f in enumerate(pose_frames):
+        near = (
+            [
+                g.pose
+                for j, g in enumerate(pose_frames)
+                if g.pose is not None
+                and segment[j] == segment[k]
+                and abs(ts[j] - ts[k]) <= GESTURE_SPEED_SPAN_SEC / 2 + _EPS
+            ]
+            if f.pose is not None
+            else []
+        )
+        centers.append(
+            (
+                statistics.fmean((p.left_shoulder[0] + p.right_shoulder[0]) / 2 for p in near),
+                statistics.fmean((p.left_shoulder[1] + p.right_shoulder[1]) / 2 for p in near),
+            )
+            if near
+            else None
+        )
+
+    def relative(k: int, wrist: str) -> Point | None:
+        # 어깨 중심 기준 손목 위치: 몸 전체가 흔들리거나 옮겨 가는 움직임은 손동작이 아니다.
+        p, c = pose_frames[k].pose, centers[k]
+        w = getattr(p, wrist) if p else None
+        if w is None or c is None:
+            return None
+        return (w[0] - c[0], w[1] - c[1])
+
+    tracks = [
+        [relative(k, "left_wrist") for k in range(len(ts))],
+        [relative(k, "right_wrist") for k in range(len(ts))],
+    ]
+    max_gap = dt * 1.5
+    baselines = [_baseline(ts, tr, GESTURE_BASELINE_SEC, width, segment, max_gap) for tr in tracks]
     gestures: list[float] = []
-    last_move: float | None = None
-    for t in moves:
-        if (
-            last_move is None
-            or t - last_move > GESTURE_MERGE_SEC + _EPS
-            or t - gestures[-1] >= GESTURE_MAX_SEC - _EPS
-        ):
+    moving = False
+    started = 0.0  # 지금 세고 있는 제스처가 시작(또는 다시 센) 시각
+    prev_away: list[float | None] = [None, None]  # 손목별 직전 프레임의 평소 위치와의 거리
+    # 손목별 고정 기준점: 제스처를 시작할 때의 평소 위치. 손을 든 채 오래 멈추면 평소 위치(지난
+    # 멈춘 프레임 중앙값)가 들린 쪽으로 옮겨 가서, 손을 내리는 것을 새 동작으로 세게 된다. 그래서
+    # 손이 이 기준점 가까이(GESTURE_START_AWAY의 절반 미만) 돌아오거나 GESTURE_ANCHOR_MAX_SEC가 지날
+    # 때까지 이 기준점으로 잰다.
+    anchors: list[tuple[Point, float] | None] = [None, None]
+    last_seen: float | None = None  # 손목이 마지막으로 잡힌 시각(판정에 못 쓴 프레임 포함)
+    back = 0  # 속도를 잴 과거 프레임 번호(지금보다 GESTURE_SPEED_SPAN_SEC 앞)
+    for k in range(1, len(ts)):
+        t = ts[k]
+        if segment[k] != segment[k - 1]:  # 자세를 오래 놓침 → 처음부터(기준점도 버림)
+            moving, prev_away, anchors = False, [math.inf, math.inf], [None, None]
+        elif any(tr[k] is not None for tr in tracks):
+            # 판정은 앞 프레임·1초 전 프레임이 다 있어야 해서 한 프레임만 놓쳐도 1~2초 건너뛴다.
+            # 놓친 시간은 손목이 실제로 잡힌 프레임 기준으로 잰다.
+            if last_seen is not None and t - last_seen > GESTURE_DROPOUT_SEC + dt + _EPS:
+                moving, prev_away = False, [math.inf, math.inf]
+            last_seen = t
+        while back + 1 < k and t - ts[back + 1] >= GESTURE_SPEED_SPAN_SEC - _EPS:
+            back += 1
+        span = t - ts[back]
+        # 앞 프레임에도 보인 손목만 본다(한 프레임만 엉뚱한 곳에 잡힌 오검출을 세지 않게).
+        visible = [
+            w
+            for w, (tr, base) in enumerate(zip(tracks, baselines, strict=True))
+            if tr[k] is not None
+            and tr[k - 1] is not None
+            and tr[back] is not None
+            and base[k] is not None
+        ]
+        gap = t - ts[k - 1]
+        too_far = span > GESTURE_SPEED_SPAN_SEC + max_gap + _EPS  # 그사이 프레임이 빠짐
+        if not visible or gap <= 0 or gap > max_gap + _EPS or too_far or span <= 0:
+            # 판정할 수 없는 프레임: 상태는 그대로 둔다(오래 놓친 경우는 위에서 처음부터).
+            # 다시 시작할 때 prev_away=inf라 한 프레임 본 뒤에야 '멀어지는 중'을 판단한다.
+            continue
+        away: dict[int, float] = {}
+        speed: dict[int, float] = {}
+        for w in visible:
+            tr = tracks[w]
+            anchor = anchors[w]
+            if anchor is not None and (
+                _dist(tr[k], anchor[0]) / width < GESTURE_START_AWAY / 2
+                or t - anchor[1] > GESTURE_ANCHOR_MAX_SEC
+            ):
+                anchors[w] = anchor = None  # 손이 돌아왔거나 너무 오래 지남 → 평소 위치로
+                # 기준이 바뀐 이 프레임은 '멀어지는 중'으로 보지 않는다(들린 쪽으로 옮겨 간 평소
+                # 위치에서 보면 방금 내린 손이 멀어지는 것처럼 보인다)
+                prev_away[w] = math.inf
+            ref = anchor[0] if anchor is not None else baselines[w][k]
+            away[w] = _dist(tr[k], ref) / width  # type: ignore[arg-type]
+            speed[w] = _dist(tr[back], tr[k]) / width / span  # type: ignore[arg-type]
+        if not moving:
+            # 같은 손목이 평소 위치에서 멀리, 빠르게, 멀어지는 방향으로 움직일 때 시작
+            # (들고 있던 손을 내리는 것은 기준점에 가까워지는 것이라 새 동작이 아님)
+            if any(
+                away[w] >= GESTURE_START_AWAY - _EPS
+                and speed[w] >= GESTURE_START_SPEED
+                and (prev_away[w] is None or away[w] > prev_away[w])  # type: ignore[operator]
+                for w in visible
+            ):
+                moving, started = True, t
+                gestures.append(t)
+                for w in visible:
+                    if anchors[w] is None:
+                        anchors[w] = (baselines[w][k], t)  # type: ignore[assignment]
+        elif max(speed.values()) < GESTURE_END_SPEED:
+            moving = False  # 멈춤 → 동작 끝
+        elif t - started >= GESTURE_MAX_SEC - _EPS and max(speed.values()) >= GESTURE_START_SPEED:
+            # 쉬지 않고 계속 크게 움직일 때만 다시 센다
+            started = t
             gestures.append(t)
-        last_move = t
+        prev_away = [away.get(w, prev_away[w]) for w in (0, 1)]
     return gestures
 
 

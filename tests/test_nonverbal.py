@@ -391,52 +391,166 @@ def _moves(offsets, fps: float = 1.0) -> list[FrameObs]:
     return [frame(i / fps, p=pose(lw=(o, 0.0))) for i, o in enumerate(offsets)]
 
 
-@pytest.mark.parametrize(("move", "counted"), [(0.25, True), (0.24, False)])
-def test_gesture_threshold(move, counted):
-    assert nv.GESTURE_MOVE_RATIO == 0.25
-    offsets = [0.0] * 10 + [move] + [move] * 9
-    r = analyze_nonverbal(_moves(offsets))
-    assert r.gesture_times == ([10.0] if counted else [])
+def _excursions(
+    peaks: list[float], hold: float = 1.5, rest: float = 4.0, fps: float = 2.0, lead: float = 10.0
+) -> list[float]:
+    """lead초 쉼 → (0.5초 올림, hold초 유지, 0.5초 내림, rest초 쉼) × 동작 → lead초 쉼."""
+    out = [0.0] * int(lead * fps)
+    for peak in peaks:
+        out += [peak / 2, peak]  # 0.5초에 걸쳐 올림(2fps)
+        out += [peak] * int(hold * fps)
+        out += [peak / 2]
+        out += [0.0] * int(rest * fps)
+    return out + [0.0] * int(lead * fps)  # 끝에도 쉬는 구간
 
 
-def test_short_continuous_movement_is_one_gesture():
-    # 10, 11초 연달아 움직임(간격 1초 = GESTURE_MERGE_SEC) → 한 번
-    offsets = [0.0] * 10 + [0.3, 0.6] + [0.6] * 8
-    assert analyze_nonverbal(_moves(offsets)).gesture_times == [10.0]
+@pytest.mark.parametrize(("peak", "counted"), [(0.3, 1), (0.2, 0)])
+def test_gesture_start_amplitude(peak, counted):
+    # 평소 위치에서 어깨 너비의 0.25 이상 벗어나야 제스처
+    assert nv.GESTURE_START_AWAY == 0.25
+    frames = _moves(_excursions([peak]), fps=2.0)
+    assert len(analyze_nonverbal(frames).gesture_times) == counted
 
 
-def test_long_continuous_movement_counts_every_max_sec():
-    assert nv.GESTURE_MAX_SEC == 2.0
-    # 60초 내내 손을 흔든다 → 2초마다 한 번 = 분당 30, 모든 구간이 EXCESS
-    offsets = [0.0 if i % 2 else 0.5 for i in range(60)]
-    r = analyze_nonverbal(_moves(offsets))
-    assert r.metrics.gesture_per_min == pytest.approx(30, abs=1.5)
-    assert ranges(r.gesture_excess_ranges) == [(0.0, 60.0)]
+def test_hysteresis_dip_above_end_is_one_gesture():
+    # 0.4까지 올렸다 0.2(끝 기준 0.15보다 큼)로 잠깐 내렸다 다시 0.4 → 한 번
+    offsets = [0.0] * 20 + [0.2, 0.4, 0.4, 0.4, 0.2, 0.2, 0.4, 0.4, 0.4, 0.2] + [0.0] * 20
+    assert len(analyze_nonverbal(_moves(offsets, fps=2.0)).gesture_times) == 1
+
+
+def test_turnaround_without_stopping_is_one_gesture():
+    # 손을 올렸다가 멈추지 않고 방향만 바꿔 내리면(반환점) 한 번
+    offsets = [0.0] * 20 + [0.3, 0.6, 0.9, 0.6, 0.3] + [0.0] * 20
+    assert len(analyze_nonverbal(_moves(offsets, fps=2.0)).gesture_times) == 1
+
+
+@pytest.mark.parametrize("rest", [3.0, 1.0])
+def test_rest_between_movements_separates_gestures(rest):
+    # 1초만 멈췄다 다시 들어도 별개의 동작
+    frames = _moves(_excursions([0.5, 0.5], rest=rest), fps=2.0)
+    assert len(analyze_nonverbal(frames).gesture_times) == 2
+
+
+@pytest.mark.parametrize("hold", [3.0, 15.0])
+@pytest.mark.parametrize("which", ["both", "left"])
+def test_one_frame_dropout_keeps_gesture(hold, which):
+    # 손을 든 동안(또는 내리기 직전) 어느 한 프레임 손목을 놓쳐도 같은 동작.
+    # 판정은 1초 전 프레임까지 있어야 해서 한 프레임만 놓쳐도 1~2초를 건너뛰므로 위치마다 확인한다.
+    offsets = _excursions([0.6], hold=hold)
+    up = [k for k, o in enumerate(offsets) if o == 0.6]
+    for k in range(up[0], up[-1] + 2):
+        frames = _moves(offsets, fps=2.0)
+        lw = None
+        rw = (0.0, 0.0) if which == "left" else None  # 오른손은 제자리에 보임
+        frames[k] = frame(k / 2, p=pose(lw=lw, rw=rw))
+        assert len(analyze_nonverbal(frames).gesture_times) == 1, k
+
+
+@pytest.mark.parametrize(("period", "fps"), [(8.0, 2.0), (4.0, 2.0), (2.5, 2.0), (4.0, 1.0)])
+def test_frequent_gestures_are_counted(period, fps):
+    # period초마다 1초 올리고 1초 내리는 손동작(앞 10초는 쉼) → 거의 다 센다
+    # (잦은 손동작을 놓치면 GESTURE_NONE으로 잘못 판단한다)
+    def lift(t):
+        ph = (t - 10) % period
+        return 0.0 if t < 10 else 0.6 * (ph if ph < 1 else 2 - ph if ph < 2 else 0)
+
+    n = int(120 * fps)
+    r = analyze_nonverbal(_moves([lift(i / fps) for i in range(n)], fps=fps))
+    truth = math.ceil(110 / period)
+    assert abs(len(r.gesture_times) - truth) <= max(1, 0.1 * truth), len(r.gesture_times)
+    assert r.gesture_none_ranges == [] or r.gesture_none_ranges[0].start == 0.0
+
+
+def test_resting_jitter_is_not_a_gesture():
+    # 가만히 있는 손목이 프레임마다 ±0.01(프레임 너비) 떨림 → 제스처 아님
+    import random
+
+    rng = random.Random(1)
+    frames = [
+        frame(i / 2, p=pose(lw=(rng.uniform(-0.05, 0.05), rng.uniform(-0.05, 0.05))))
+        for i in range(120)
+    ]
+    assert analyze_nonverbal(frames).gesture_times == []
+
+
+@pytest.mark.parametrize("hold", [8.0, 15.0, 25.0, 50.0])
+def test_holding_hand_up_is_one_gesture(hold):
+    # 손을 들고 오래 가만히 있다가(슬라이드 가리키기) 내려도 한 번. 평소 위치가 들린 손 쪽으로
+    # 옮겨 가도 제스처 시작 때의 기준점으로 재므로 내리는 것을 새 동작으로 세지 않는다.
+    frames = _moves(_excursions([0.5], hold=hold), fps=2.0)
+    assert len(analyze_nonverbal(frames).gesture_times) == 1
+
+
+@pytest.mark.parametrize("second", [0.5, -0.5, 0.3])
+def test_new_gesture_soon_after_long_hold_is_counted(second):
+    # 15초 들고 있다가 내린 뒤 2초 만에 다시 든 손은 새 동작
+    frames = _moves(_excursions([0.5, second], hold=15.0, rest=2.0), fps=2.0)
+    assert len(analyze_nonverbal(frames).gesture_times) == 2
+
+
+def test_hand_moved_to_new_rest_position_for_long_time():
+    # 손을 옮겨 GESTURE_ANCHOR_MAX_SEC보다 오래 두면 그곳이 새 평소 위치 → 거기서 옛 평소 위치
+    # 쪽으로(하지만 그 가까이까지는 아니게) 움직인 손도 움직인 순간 센다
+    assert nv.GESTURE_ANCHOR_MAX_SEC == 60.0
+    offsets = [0.0] * 20 + [0.25, 0.5] + [0.5] * 140 + [0.35, 0.2, 0.2, 0.35] + [0.5] * 20
+    times = analyze_nonverbal(_moves(offsets, fps=2.0)).gesture_times
+    assert times == [10.0, 81.5]
+
+
+def test_waving_from_the_first_frame_is_counted():
+    # 쉬는 프레임 없이 처음부터 계속 손을 움직여도(평소 위치 = 가장 느린 프레임들) 센다
+    wave = [0.0, 0.6, 1.2, 0.6] * 30  # 60초
+    r = analyze_nonverbal(_moves(wave, fps=2.0))
+    assert len(r.gesture_times) >= 20
     assert r.gesture_none_ranges == []
 
 
+def test_moving_hand_right_after_long_gap_is_not_still():
+    # 자세를 오래 놓친 뒤 첫 프레임은 긴 간격으로 나눈 속도로 '멈춤'이 되면 안 된다
+    frames = still(10) + [FrameObs(t=10 + i, yaw=0.0, pitch=0.0, pose=None) for i in range(30)]
+    offsets = [0.0, 0.6, 1.2, 0.6] * 10
+    frames += [frame(40 + i / 2, p=pose(lw=(o, 0.0))) for i, o in enumerate(offsets)]
+    r = analyze_nonverbal(frames)
+    assert len([g for g in r.gesture_times if g >= 40]) >= 5
+
+
+def test_body_sway_is_not_a_gesture():
+    # 몸 전체가 좌우로 흔들리면 손목도 같이 움직이지만, 어깨 기준으로는 제자리 → 제스처 아님
+    frames = [frame(i / 2, p=pose(dx=0.4 * math.sin(i / 2))) for i in range(120)]
+    assert analyze_nonverbal(frames).gesture_times == []
+
+
+def test_long_continuous_waving_counts_repeatedly():
+    # 30초 동안 크게 계속 휘저으면 GESTURE_MAX_SEC(3초)마다 다시 센다
+    assert nv.GESTURE_MAX_SEC == 3.0
+    wave = [0.0, 0.6, 1.2, 0.6] * 15  # 2초 주기, 2fps, 30초
+    frames = _moves([0.0] * 20 + wave + [0.0] * 20, fps=2.0)
+    # 적어도 3초마다 한 번(10), 많아도 왕복 한 번에 한 번(15). 2fps에서 1초 변위가 왕복 주기와
+    # 맞물리면 반환점마다 멈춘 것처럼 보여 왕복마다 센다.
+    r = analyze_nonverbal(frames)
+    assert 10 <= len(r.gesture_times) <= 15
+    assert r.gesture_excess_ranges  # 분당 20회 초과
+
+
 def test_separate_movements_are_counted_separately():
-    offsets = [0.0] * 5 + [0.5, 0.5, 0.5, 0.0] + [0.0] * 11  # 5초, 8초에 움직임
-    assert analyze_nonverbal(_moves(offsets)).gesture_times == [5.0, 8.0]
+    frames = _moves(_excursions([0.5, 0.6, 0.5]), fps=2.0)
+    assert len(analyze_nonverbal(frames).gesture_times) == 3
 
 
-def test_merge_with_two_fps():
-    # 0.5초 간격으로 연달아 움직이면 한 번, 1.5초 떨어지면 따로
-    offsets = [0.0] * 20 + [0.3, 0.6, 0.9, 0.9, 0.9, 0.0] + [0.0] * 14
-    r = analyze_nonverbal(_moves(offsets, fps=2.0))
-    assert r.gesture_times == [10.0, 12.5]
+def test_separate_movements_one_fps():
+    frames = _moves(_excursions([0.5, 0.5], hold=2.0, fps=1.0), fps=1.0)
+    assert len(analyze_nonverbal(frames).gesture_times) == 2
 
 
 def test_either_wrist_counts_once():
-    frames = still(10)
-    frames.append(frame(10, p=pose(lw=(0.5, 0.0), rw=(-0.5, 0.0))))
-    frames += [frame(11 + i, p=pose(lw=(0.5, 0.0), rw=(-0.5, 0.0))) for i in range(9)]
-    assert analyze_nonverbal(frames).gesture_times == [10.0]
+    offsets = _excursions([0.5])
+    frames = [frame(i / 2, p=pose(lw=(o, 0.0), rw=(-o, 0.0))) for i, o in enumerate(offsets)]
+    assert len(analyze_nonverbal(frames).gesture_times) == 1
 
 
 def test_invisible_wrist_is_not_a_gesture():
     frames = still(10) + [frame(10 + i, p=pose(lw=None)) for i in range(10)]
-    frames[12] = frame(12, p=pose(lw=(1.0, 1.0)))  # 앞뒤가 None이라 비교 불가
+    frames[12] = frame(12, p=pose(lw=(1.0, 1.0)))  # 앞뒤가 None: 한 프레임 오검출
     assert analyze_nonverbal(frames).gesture_times == []
 
 
@@ -448,23 +562,23 @@ def test_gap_in_pose_frames_is_not_a_gesture():
 
 
 def test_gesture_per_min():
-    # 60초, 10초마다 손을 뻗었다 바로 내림(연속 움직임 = 한 번) → 분당 6
-    offsets = []
-    for _ in range(6):
-        offsets += [0.0] * 9 + [0.5]
-    r = analyze_nonverbal(_moves(offsets))
+    # 60초 동안 6번 → 분당 6
+    offsets = _excursions([0.5] * 6, hold=1.5, rest=6.0, lead=2.0)  # 1번당 8.5초
+    offsets = offsets[:120] + [0.0] * max(0, 120 - len(offsets))
+    r = analyze_nonverbal(_moves(offsets, fps=2.0))
     assert len(r.gesture_times) == 6
     assert r.metrics.gesture_per_min == 6.0
 
 
 def test_gesture_none_and_excess_windows():
     assert nv.GESTURE_WINDOW_SEC == 30.0 and nv.GESTURE_EXCESS_PER_MIN == 20.0
-    offsets = [0.0] * 30  # 0~30초: 제스처 없음
-    offsets += [0.5 if (i // 2) % 2 else 0.0 for i in range(30)]  # 30~60초: 2초마다 움직임
-    offsets += [0.0] * 10 + [0.5] * 20  # 60~90초: 1번
-    r = analyze_nonverbal(_moves(offsets))
-    assert ranges(r.gesture_none_ranges) == [(0.0, 30.0)]
+    offsets = [0.0] * 60  # 0~30초: 제스처 없음
+    # 30~60초: 2.5초마다 한 번(분당 24) → 과다
+    offsets += _excursions([0.6] * 12, hold=0.5, rest=1.0, lead=0.0)[:60]
+    offsets += [0.0] * (180 - len(offsets))  # 60~90초: 없음
+    r = analyze_nonverbal(_moves(offsets, fps=2.0))
     assert ranges(r.gesture_excess_ranges) == [(30.0, 60.0)]
+    assert ranges(r.gesture_none_ranges) == [(0.0, 30.0), (60.0, 90.0)]
 
 
 def test_wrists_not_visible_means_gesture_not_measured():

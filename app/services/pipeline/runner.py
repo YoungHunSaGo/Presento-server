@@ -3,7 +3,8 @@
 단계(명세 6장 stage·progress):
 - EXTRACTING_AUDIO 0~10: 영상 길이 확인(10분 초과 VIDEO_TOO_LONG), 영상 내려받기·해시, 음성 추출
 - TRANSCRIBING 10~40: whisper-1 받아쓰기 → 말하기 지표
-- ANALYZING_NONVERBAL 40~65: 원본 프레임(초당 1장) → MediaPipe(자세 640px, 얼굴은 머리 영역) → 지표
+- ANALYZING_NONVERBAL 40~65: 원본 프레임(초당 2장, 실제 프레임 시각) → MediaPipe
+  (자세 640px, 얼굴은 머리 영역) → 지표
 - ANALYZING_CONTENT 65~80: 슬라이드 텍스트(있으면) → LLM 내용 분석
 - GENERATING_FEEDBACK 80~100: 점수(코드) → LLM 피드백 → 리포트 조립·검증·저장
 
@@ -86,8 +87,9 @@ from app.services.storage import Storage, StorageError
 logger = logging.getLogger(__name__)
 
 # 알고리즘·프롬프트·기준값을 바꾸면 올린다. 바뀐 버전의 결과는 재사용하지 않는다.
-PIPELINE_VERSION = "3"  # 2: 얼굴 머리 영역 자르기, 3: stt 프롬프트 v2
-FRAME_FPS = 1.0
+# 2: 얼굴 머리 영역 자르기, 3: stt 프롬프트 v2, 4: 실제 프레임 시각·2fps·제스처 안정화
+PIPELINE_VERSION = "4"
+FRAME_FPS = 2.0  # 비언어(자세·제스처·시선) 프레임. 1fps와 처리 시간이 거의 같다(디코딩이 대부분)
 _HASH_CHUNK = 1024 * 1024
 WORKDIR_PREFIX = "presento-"
 STALE_WORKDIR_SEC = 30 * 60  # Celery hard limit(16분)보다 넉넉히

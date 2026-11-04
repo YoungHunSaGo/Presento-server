@@ -33,6 +33,12 @@ def main(argv: list[str] | None = None, session_factory=None) -> int:
     mode.add_argument("--all", action="store_true", help="중간 결과가 있는 모든 회차")
     mode.add_argument("--stats", action="store_true", help="저장 용량 통계만 보기")
     ap.add_argument("--dry-run", action="store_true", help="저장하지 않고 결과만 보기")
+    ap.add_argument(
+        "--allow-old-version",
+        action="store_true",
+        help="다른 파이프라인 버전으로 만든 중간 결과도 지금 코드로 재계산(프레임 추출 방식이 달라"
+        " 새로 분석한 결과와 다를 수 있음)",
+    )
     args = ap.parse_args(argv)
     if (args.all or args.stats) and args.analysis_ids:
         ap.error("회차 ID와 --all/--stats는 함께 쓸 수 없어요")
@@ -55,12 +61,17 @@ def main(argv: list[str] | None = None, session_factory=None) -> int:
         ids = list(args.analysis_ids)
         if args.all:
             ids = list(db.scalars(select(AnalysisArtifact.analysis_id)))
+            if not ids:
+                print("중간 결과가 저장된 회차가 없어요")
+                return 0
         if not ids:
             ap.error("회차 ID나 --all을 주세요")
         failed = 0
         for aid in ids:
             try:
-                old, new, drift = recompute(db, aid, write=not args.dry_run)
+                old, new, drift = recompute(
+                    db, aid, write=not args.dry_run, allow_old_version=args.allow_old_version
+                )
             except Exception as e:  # noqa: BLE001 - 한 회차가 실패해도 나머지는 계속
                 db.rollback()
                 failed += 1

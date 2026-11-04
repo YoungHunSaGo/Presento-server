@@ -5,6 +5,7 @@
 """
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -537,3 +538,61 @@ def test_real_iter_frames_timeout_kills_ffmpeg(tmp_path):
     gen = audio.iter_frames(src, "video/mp4", fps=1, timeout=0.001)
     with pytest.raises(audio.FFmpegUnavailable):
         list(gen)
+
+
+# ---------- 프레임 시각 = 실제로 뽑힌 프레임의 시각 ----------
+
+
+def _showinfo_times(src, fps):
+    """ffmpeg가 같은 select 필터로 고른 프레임들의 실제 시각(showinfo의 pts_time)."""
+    interval = 1.0 / fps
+    vf = f"select='isnan(prev_selected_t)+gte(t-prev_selected_t,{interval!r})',showinfo"
+    res = subprocess.run(  # noqa: S603
+        ["ffmpeg", "-v", "info", "-i", str(src), "-map", "0:V:0", "-vf", vf,  # noqa: S607
+         "-fps_mode", "passthrough", "-f", "null", "-"],
+        capture_output=True, text=True, check=True,
+    )  # fmt: skip
+    return [float(m) for m in re.findall(r"pts_time:\s*(-?[\d.]+)", res.stderr)]
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("fps", [1.0, 2.0])
+@pytest.mark.parametrize(
+    ("name", "make", "ctype"),
+    [
+        # 초당 7장: 0.5초 간격 프레임이 없어 0, 0.571, 1.143… 처럼 실제 프레임 시각을 써야 한다
+        ("odd.mp4", ["-f", "lavfi", "-t", "4", "-i", "testsrc=size=160x120:rate=7",
+                     "-c:v", "mpeg4"], "video/mp4"),
+        # 타임스탬프가 5초부터 시작
+        ("offset.webm", ["-f", "lavfi", "-t", "4", "-i", "testsrc=size=160x120:rate=10",
+                         "-output_ts_offset", "5", "-c:v", "libvpx"], "video/webm"),
+    ],
+)  # fmt: skip
+def test_real_frame_times_match_ffmpeg(tmp_path, fps, name, make, ctype):
+    src = tmp_path / name
+    _ffmpeg_make([*make, str(src)])
+    got = [f.timestamp for f in audio.iter_frames(src, ctype, fps=fps)]
+    want = _showinfo_times(src, fps)
+    assert got == pytest.approx(want, abs=1e-3)
+    # 초당 7장에서 2장을 고르면 4장마다 1장(0.571초 간격)이라 7장이 된다(ffmpeg와 같음)
+    assert len(got) >= round(4 * fps) - 1
+
+
+@needs_ffmpeg
+def test_real_frame_times_with_edit_list(tmp_path):
+    # 키프레임 사이에서 -c copy로 자르면 mp4에 편집 목록이 생기고, 앞부분 패킷은 디코더가 버린다
+    raw = tmp_path / "raw.mp4"
+    _ffmpeg_make(["-f", "lavfi", "-t", "5", "-i", "testsrc=size=160x120:rate=10",
+                  "-c:v", "libx264", "-g", "20", str(raw)])  # fmt: skip
+    src = tmp_path / "cut.mp4"
+    _ffmpeg_make(["-ss", "0.75", "-i", str(raw), "-c", "copy", str(src)])
+    got = [f.timestamp for f in audio.iter_frames(src, "video/mp4", fps=2)]
+    want = _showinfo_times(src, 2)
+    assert got == pytest.approx(want, abs=1e-3)
+    assert got[0] == 0.0
+
+
+def test_label_extends_when_time_list_is_short():
+    assert audio._label([0.0, 0.47], 1, 0.5) == 0.47
+    assert audio._label([0.0, 0.47], 3, 0.5) == 1.47  # 목록보다 많이 받으면 간격만큼 이어 붙임
+    assert audio._label([], 0, 0.5) == 0.0

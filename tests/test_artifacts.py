@@ -8,7 +8,7 @@ from app.models import AnalysisArtifact, Report
 from app.models.enums import ScoreCategory
 from app.schemas.report import Feedback, FeedbackType, Severity, SlideCoverage
 from app.services.pipeline import artifacts as art
-from app.services.pipeline import scoring
+from app.services.pipeline import runner, scoring
 from app.services.pipeline.content import (
     ContentAnalysis,
     ContentIssue,
@@ -83,8 +83,11 @@ def test_runner_saves_artifacts(world, db):  # noqa: F811
     d = a.data
     assert set(d) == {"formatVersion", "input", "stt", "speech", "nonverbal", "content", "feedback"}
     assert d["input"] == {
-        "pipelineVersion": "3", "purpose": "CLASS", "durationSec": 30.0, "timeLimitSec": 60,
-    }  # fmt: skip
+        "pipelineVersion": runner.PIPELINE_VERSION,
+        "purpose": "CLASS",
+        "durationSec": 30.0,
+        "timeLimitSec": 60,
+    }
     words = [w for s in d["stt"]["transcript"]["segments"] for w in s["words"]]
     assert words and all(w["tag"] is None for w in words)  # 태그 없는 원래 받아쓰기
     assert len(d["nonverbal"]["frames"]) == 15
@@ -258,7 +261,11 @@ def test_cli_continues_after_unexpected_error(world, db, app, capsys, monkeypatc
     for aid in ids:
         world.run(aid)
     bad = db.get(AnalysisArtifact, ids[0])
-    bad.data = {**bad.data, "input": {"secret": "대본 일부"}}  # KeyError
+    # durationSec 등이 없어 KeyError(버전 확인은 통과)
+    bad.data = {
+        **bad.data,
+        "input": {"pipelineVersion": runner.PIPELINE_VERSION, "secret": "대본 일부"},
+    }
     db.commit()
     assert cli.main(["--all"], session_factory=app.state.session_factory) == 1
     out = capsys.readouterr().out
@@ -282,3 +289,28 @@ def test_unstorable_artifacts_are_skipped_not_failing(world, db, monkeypatch):  
     assert world.run(aid) == "completed"
     assert db.get(Report, aid) is not None
     assert db.get(AnalysisArtifact, aid) is None
+
+
+def test_cli_all_with_no_artifacts(app, capsys):
+    assert cli.main(["--all"], session_factory=app.state.session_factory) == 0
+    assert "없어요" in capsys.readouterr().out
+
+
+def test_recompute_rejects_other_pipeline_version(world, db, app, capsys):  # noqa: F811
+    aid = world.make()
+    world.run(aid)
+    a = db.get(AnalysisArtifact, aid)
+    a.data = {**a.data, "input": {**a.data["input"], "pipelineVersion": "3"}}
+    db.commit()
+    with pytest.raises(art.ArtifactMissing, match="pipeline version"):
+        art.recompute(db, aid, write=False)
+    _, _, drift = art.recompute(db, aid, write=False, allow_old_version=True)
+    assert drift is False
+    assert cli.main([aid, "--dry-run"], session_factory=app.state.session_factory) == 1
+    assert "pipeline version" in capsys.readouterr().out
+    assert (
+        cli.main(
+            [aid, "--dry-run", "--allow-old-version"], session_factory=app.state.session_factory
+        )
+        == 0
+    )

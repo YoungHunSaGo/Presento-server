@@ -327,6 +327,56 @@ def _read_exact(stream, n: int) -> bytes | None:
     return b"".join(chunks)
 
 
+def _selected_times(
+    src: str, demuxer: str, interval: float, max_seconds: float | None, timeout: float
+) -> list[float]:
+    """select 필터가 고를 프레임들의 시각(영상 시작 기준 초). 디코딩 없이 패킷 시각으로 구한다."""
+    args = [
+        "ffprobe", "-v", "error", "-protocol_whitelist", "file", "-f", demuxer,
+        "-select_streams", "V:0",
+        "-show_entries", "stream=time_base:packet=pts,flags:format=start_time",
+        "-of", "json", f"file:{src}",
+    ]  # fmt: skip
+    res = _exec(args, timeout)
+    if res.returncode != 0:
+        raise MediaError(res.stderr.replace(src, "<path>").strip()[:_STDERR_MAX])
+    try:
+        data = json.loads(res.stdout or "{}")
+        num, den = (int(x) for x in data["streams"][0]["time_base"].split("/"))
+        tb = num / den  # ffmpeg av_q2d와 같은 값
+        raw_start = data.get("format", {}).get("start_time")
+        start = float(raw_start) if raw_start not in (None, "N/A") else 0.0
+        # ffmpeg는 입력 시작 시각을 타임베이스 단위 정수로 바꿔 pts에서 뺀다(-copyts가 없을 때)
+        offset = round(start / tb)
+    except (json.JSONDecodeError, KeyError, IndexError, ValueError, ZeroDivisionError):
+        raise MediaError("video timing unknown") from None
+    pts = sorted(
+        {
+            int(p["pts"])
+            for p in data.get("packets") or []
+            if p.get("pts") not in (None, "N/A") and "D" not in (p.get("flags") or "")
+        }  # D: 디코더가 버리는 패킷(편집 목록 앞부분 등) → 프레임으로 나오지 않는다
+    )
+    selected: list[float] = []
+    prev: float | None = None
+    for p in pts:
+        t = float(p - offset) * tb  # select 필터의 t와 같은 계산
+        if prev is None or t - prev >= interval:
+            if max_seconds is not None and t >= max_seconds:
+                break
+            selected.append(round(max(0.0, t), 3))
+            prev = t
+    return selected
+
+
+def _label(times: list[float], index: int, interval: float) -> float:
+    """index번째로 받은 장의 시각. 목록이 모자라면(예상 밖) 마지막 시각에서 간격만큼 이어 붙인다."""
+    if index < len(times):
+        return times[index]
+    last = times[-1] if times else -interval
+    return round(last + (index - len(times) + 1) * interval, 3)
+
+
 def iter_frames(
     source: Path,
     content_type: str,
@@ -341,8 +391,12 @@ def iter_frames(
     얼굴처럼 작은 대상을 원본에서 잘라 보려고 쓴다. ffmpeg가 rawvideo를 파이프로 내보내고,
     한 번에 한 장만 메모리에 둔다(1080p 약 6MB). 마지막 장을 돌려준 뒤 ffmpeg 오류·잘린 파일을
     확인해 예외를 낸다(sample_frames와 같은 구분: NoVideoStream / MediaError / FFmpegUnavailable).
-    타임스탬프는 n번째 장 = n / fps(fps 필터의 출력 순서). 시작 시각이 0보다 앞선 영상은
-    sample_frames(음수 pts 프레임을 버림)와 첫 장이 한 장 어긋날 수 있다.
+
+    타임스탬프는 실제로 뽑은 원본 프레임의 시각(영상 시작 기준 초)이다. fps 필터는 시각을
+    출력 순번으로 바꿔 버려 "0초"라고 표시한 프레임이 실제로는 0.47초 프레임이 되는 문제가 있었다.
+    그래서 원본 시각을 유지하는 select 필터로 "첫 프레임, 그다음은 직전에 고른 프레임보다
+    1/fps초 이상 뒤의 첫 프레임"을 고르고, 같은 규칙을 ffprobe가 읽은 패킷 시각(디코딩 없음)에
+    적용해 각 장의 시각을 구한다(ffmpeg select와 같은 double 계산).
     """
     if not MIN_FPS <= fps <= MAX_FPS:
         raise ValueError(f"fps must be between {MIN_FPS:g} and {MAX_FPS:g}")
@@ -352,13 +406,19 @@ def iter_frames(
     limit = _limit_args(max_seconds)
     target = _target_seconds(expected_duration, max_seconds)
     timeout = _timeout_for(timeout, target, max_seconds)
-    width, height = _video_size(src, DEMUXERS[content_type], min(timeout, TIMEOUT_BASE_SEC))
+    demuxer = DEMUXERS[content_type]
+    probe_timeout = min(timeout, TIMEOUT_BASE_SEC)
+    width, height = _video_size(src, demuxer, probe_timeout)
+    interval = 1.0 / fps
+    times = _selected_times(src, demuxer, interval, max_seconds, probe_timeout)
     frame_bytes = width * height * 3
+    select = f"select='isnan(prev_selected_t)+gte(t-prev_selected_t,{interval!r})'"
     args = [
         *base, *limit,
         "-map", "0:V:0", "-an", "-sn", "-dn",
         # 크기를 못 박아 둔다. ffprobe가 크기·회전을 잘못 알려도 읽는 단위가 어긋나지 않는다.
-        "-vf", f"fps={fps:g},scale={width}:{height}",
+        "-vf", f"{select},scale={width}:{height}",
+        "-fps_mode", "passthrough",  # 고른 프레임을 복제·누락 없이 그대로 내보낸다
         "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
     ]  # fmt: skip
     try:
@@ -394,7 +454,7 @@ def iter_frames(
     try:
         while (buf := _read_exact(stdout, frame_bytes)) is not None:
             rgb = np.frombuffer(buf, dtype=np.uint8).reshape(height, width, 3)
-            yield DecodedFrame(timestamp=count / fps, rgb=rgb)
+            yield DecodedFrame(timestamp=_label(times, count, interval), rgb=rgb)
             count += 1
         proc.wait()
     finally:
@@ -417,4 +477,6 @@ def iter_frames(
         raise MediaError(stderr[:_STDERR_MAX])
     if count == 0:
         raise MediaError("no frames could be decoded")
-    _check_coverage("frames", count / fps, target)
+    if count != len(times):
+        logger.warning("frame time list mismatch (%d frames, %d times)", count, len(times))
+    _check_coverage("frames", _label(times, count - 1, interval) + interval, target)

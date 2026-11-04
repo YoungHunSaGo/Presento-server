@@ -333,8 +333,17 @@ def rebuild_report(
     return report, drift
 
 
-def recompute(db: Session, analysis_id: str, *, write: bool = True) -> tuple[dict, dict, bool]:
-    """저장된 중간 결과로 리포트를 다시 만든다(write면 저장). (이전, 새 리포트, drift)"""
+def recompute(
+    db: Session, analysis_id: str, *, write: bool = True, allow_old_version: bool = False
+) -> tuple[dict, dict, bool]:
+    """저장된 중간 결과로 리포트를 다시 만든다(write면 저장). (이전, 새 리포트, drift)
+
+    중간 결과를 만든 파이프라인 버전이 지금과 다르면 거부한다(allow_old_version이 아니면).
+    예: 버전 3은 초당 1장·가려진 손목 포함으로 뽑은 프레임이라, 새 제스처 계산을 얹으면 예전
+    결과도 새로 분석한 결과도 아닌 숫자가 나온다.
+    """
+    from app.services.pipeline.runner import PIPELINE_VERSION  # runner가 이 모듈을 import한다
+
     a = db.get(Analysis, analysis_id)
     if a is None:
         raise ArtifactMissing(f"analysis {analysis_id} not found")
@@ -342,6 +351,12 @@ def recompute(db: Session, analysis_id: str, *, write: bool = True) -> tuple[dic
     rep = db.get(Report, analysis_id)
     if art is None or rep is None:
         raise ArtifactMissing(f"analysis {analysis_id} has no stored intermediate results")
+    stored = (art.data.get("input") or {}).get("pipelineVersion")
+    if stored != PIPELINE_VERSION and not allow_old_version:
+        raise ArtifactMissing(
+            f"pipeline version {stored!r} != current {PIPELINE_VERSION!r}"
+            " (re-analyze, or use --allow-old-version)"
+        )
     created = a.created_at if a.created_at.tzinfo else a.created_at.replace(tzinfo=UTC)
     # 제한 시간·목적은 처음 분석 때 값(저장값)을 쓴다(나중에 발표를 고쳐도 같은 결과가 나오게).
     new, drift = rebuild_report(

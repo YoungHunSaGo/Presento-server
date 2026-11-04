@@ -82,7 +82,7 @@ docs/
 - 외부 AI 호출 실패는 `AI_SERVICE_ERROR`로 분석을 `FAILED` 처리한다. 목소리가 없으면 `NO_SPEECH_DETECTED`, 얼굴이 거의 없으면 `NO_FACE_DETECTED`.
 - 영상 10분 초과는 `VIDEO_TOO_LONG`. whisper 업로드 25MB 제한을 넘지 않게 음성은 모노 16kHz로 변환해 보낸다.
 - 같은 영상 해시의 결과는 재사용해 API를 다시 호출하지 않는다.
-- **평가와 시연은 Docker 안에서만 실행한다.** 같은 영상이라도 ffmpeg 버전(YUV→RGB 색 변환)과 MediaPipe 플랫폼 빌드(macOS/Linux)에 따라 랜드마크가 달라져 제스처 같은 지표가 바뀐다(실측: 같은 영상에서 분당 제스처 Docker 8.57 / Mac 13.33). 로컬(Mac) 실행 결과는 점수 비교에 쓰지 않는다.
+- **평가와 시연은 Docker 안에서만 실행한다.** 같은 영상이라도 ffmpeg 버전(YUV→RGB 색 변환)과 MediaPipe 플랫폼 빌드(macOS/Linux)에 따라 랜드마크가 달라져 제스처 같은 지표가 바뀐다(실측: 같은 영상에서 분당 제스처 Docker 8.57 / Mac 13.33. 안정화 뒤 손이 가려진 이 영상은 양쪽 모두 측정 불가로 일치, 시선 0.25/0.23). 로컬(Mac) 실행 결과는 점수 비교에 쓰지 않는다.
 
 ## 4. 작업 순서 (마일스톤)
 
