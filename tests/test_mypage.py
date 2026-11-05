@@ -604,3 +604,121 @@ def test_filler_josa_and_neutral_score_messages_and_period_preserved_weekly():
     st = build_stats([old_rec, new_rec], period=Period.DAYS_30, purpose=None, now=now)
     assert st.analysis_count == 1  # 30일 안 회차는 1개
     assert sum(w.analysis_count for w in st.weekly_activity) == 2  # 12주 차트에는 둘 다 표시
+
+
+def test_mypage_get_never_backfills_or_writes_db_and_treats_none_as_unmeasured(
+    client, auth_headers, other_headers, db, monkeypatch
+):
+    from sqlalchemy import event
+    from sqlalchemy.orm import Session
+
+    from app.services.pipeline import artifacts as art_mod
+
+    me_id = client.get(f"{API}/users/me", headers=auth_headers).json()["id"]
+    other_id = client.get(f"{API}/users/me", headers=other_headers).json()["id"]
+    now = datetime.now(UTC)
+
+    # 1) 세부 항목이 있는 완료 회차 2개 (점수 90, 80)
+    _seed_completed_analysis(
+        db,
+        user_id=me_id,
+        title="정상1",
+        overall_score=90,
+        completed_at=now - timedelta(days=3),
+    )
+    _seed_completed_analysis(
+        db,
+        user_id=me_id,
+        title="정상2",
+        overall_score=80,
+        completed_at=now - timedelta(days=2),
+    )
+
+    # 2) 마이그레이션 이전 완료 회차: metric_details·filler_counts·feedback_counts·grade 모두 None
+    p_legacy = Presentation(
+        user_id=me_id, title="구버전", purpose="CLASS", created_at=now, updated_at=now
+    )
+    p_other = Presentation(
+        user_id=other_id, title="타인구버전", purpose="CLASS", created_at=now, updated_at=now
+    )
+    db.add_all([p_legacy, p_other])
+    db.flush()
+    a_legacy = Analysis(
+        presentation_id=p_legacy.id,
+        attempt_no=1,
+        status=AnalysisStatus.COMPLETED,
+        duration_sec=60.0,
+        overall_score=70,
+        grade=None,
+        scores={"DELIVERY": 70, "NONVERBAL": 70, "CONTENT": 70},
+        metric_details=None,
+        filler_counts=None,
+        feedback_counts=None,
+        created_at=now - timedelta(days=1),
+        completed_at=now - timedelta(days=1),
+    )
+    a_other_legacy = Analysis(
+        presentation_id=p_other.id,
+        attempt_no=1,
+        status=AnalysisStatus.COMPLETED,
+        duration_sec=60.0,
+        overall_score=60,
+        grade=None,
+        scores={"DELIVERY": 60, "NONVERBAL": 60, "CONTENT": 60},
+        metric_details=None,
+        filler_counts=None,
+        feedback_counts=None,
+        created_at=now - timedelta(days=1),
+        completed_at=now - timedelta(days=1),
+    )
+    db.add_all([a_legacy, a_other_legacy])
+    db.commit()
+
+    # GET 요청 중 backfill 호출 금지 및 DB flush(쓰기) 감시
+    monkeypatch.setattr(
+        art_mod,
+        "backfill_analysis_summary",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("backfill called during GET")),
+    )
+    flushes: list[int] = []
+
+    def _on_flush(_session, _flush_context, _instances):
+        flushes.append(1)
+
+    event.listen(Session, "before_flush", _on_flush)
+    try:
+        m1 = client.get(f"{API}/users/me/stats", headers=auth_headers)
+        m2 = client.get(f"{API}/users/me/insights", headers=auth_headers)
+        m3 = client.get(f"{API}/users/me/score-timeline", headers=auth_headers)
+    finally:
+        event.remove(Session, "before_flush", _on_flush)
+
+    assert m1.status_code == 200 and m2.status_code == 200 and m3.status_code == 200
+    assert flushes == []  # GET 요청 중 어떤 DB 쓰기도 발생하지 않는다
+
+    # (b) metric_details=None인 회차도 M1·M3 전체/카테고리 점수에는 포함된다(총 3회)
+    m1_body = m1.json()
+    assert m1_body["analysisCount"] == 3
+    assert m1_body["averageScore"] == 80  # (90 + 80 + 70) / 3
+    assert m1_body["gradeDistribution"]["B"] == 1  # grade=None이어도 70점 -> B로 집계
+
+    m3_body = m3.json()
+    assert m3_body["total"] == 3 and len(m3_body["items"]) == 3
+    assert m3_body["items"][-1]["analysisId"] == a_legacy.id
+    assert m3_body["items"][-1]["grade"] == "B"
+
+    # (b) M2에서는 전체 완료 회차 수(3회)는 인정하되 세부 항목 평균·추임새·피드백 집계에서는 빠진다
+    m2_body = m2.json()
+    assert m2_body["status"] == "READY"
+    assert m2_body["analysisCount"] == 3 and m2_body["basedOnRecent"] == 3
+    assert all(m["sampleCount"] == 2 for m in m2_body["metrics"])
+    assert m2_body["topFillers"] == [{"word": "약간", "count": 6}]  # 정상 2회(3+3)만 합산
+    assert m2_body["frequentFeedbackTypes"] == [
+        {"type": "FILLER", "label": "추임새", "count": 4},
+        {"type": "PACE_FAST", "label": "말 속도 빠름", "count": 2},
+    ]
+
+    # (a) & (c) 내 구버전 회차와 다른 사용자의 구버전 회차 모두 DB에서 바뀌지 않았다
+    db.expire_all()
+    assert db.get(Analysis, a_legacy.id).metric_details is None
+    assert db.get(Analysis, a_other_legacy.id).metric_details is None

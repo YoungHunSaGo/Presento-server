@@ -618,3 +618,58 @@ def test_observe_video_gets_video_and_limits(world):
         "max_seconds": float(600),
         "expected_duration": 30.0,
     }
+
+
+def test_reuse_populates_metric_details_or_warns_when_unavailable(
+    world, db, monkeypatch, caplog
+):
+    import logging
+
+    from app.models import AnalysisArtifact
+    from app.services.pipeline import report as report_mod
+
+    first = world.make(video=b"same")
+    assert world.run(first) == "completed"
+
+    # 1) 원본 회차의 metric_details가 None이지만 아티팩트가 있으면 아티팩트로 복원해 채운다
+    a1 = _analysis(db, first)
+    a1.metric_details = None
+    db.commit()
+
+    second = world.make(video=b"same", attempt=2)
+    assert world.run(second) == "completed"
+    a2 = _analysis(db, second)
+    assert a2.metric_details is not None and "PACE" in a2.metric_details
+    assert a2.filler_counts is not None and a2.feedback_counts is not None
+
+    # 2) 원본 회차의 아티팩트가 손상되어 1차 복원이 실패하면 warning을 남기고 리포트 JSON으로 채운다
+    a2.metric_details = None
+    art2 = db.get(AnalysisArtifact, second)
+    art2.data = {"formatVersion": 999}
+    db.commit()
+
+    with caplog.at_level(logging.WARNING):
+        third = world.make(video=b"same", attempt=3)
+        assert world.run(third) == "completed"
+    a3 = _analysis(db, third)
+    assert a3.metric_details is not None and "PACE" in a3.metric_details
+    assert "Could not rebuild metric_details from artifact" in caplog.text
+
+    # 3) 리포트 역산마저 실패하면 metric_details는 None으로 남고 warning 로그가 기록된다
+    for aid in (first, second, third):
+        row = _analysis(db, aid)
+        row.metric_details = None
+        db.query(AnalysisArtifact).filter_by(analysis_id=aid).delete()
+    db.commit()
+    monkeypatch.setattr(
+        report_mod,
+        "_metric_details_from_report_json",
+        lambda _d: (_ for _ in ()).throw(ValueError("cannot derive")),
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        fourth = world.make(video=b"same", attempt=4)
+        assert world.run(fourth) == "completed"
+    a4 = _analysis(db, fourth)
+    assert a4.metric_details is None
+    assert "Could not derive metric_details for reused analysis" in caplog.text

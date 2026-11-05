@@ -24,7 +24,6 @@ from app.services.mypage import (
     build_score_timeline,
     build_stats,
 )
-from app.services.pipeline.artifacts import backfill_analysis_summary
 from app.services.pipeline.scoring import grade_for
 
 router = APIRouter(prefix="/users/me", tags=["mypage"])
@@ -35,23 +34,29 @@ _DOCS = {
 }
 
 
-def _query_rows(db: Session, user_id: str) -> list:
+def _load_completed_records(db: Session, user_id: str) -> list[CompletedRecord]:
+    """사용자의 완료된 회차 요약 컬럼만 단일 조인 쿼리로 읽는다(Report.data 조회·DB 쓰기 없음).
+
+    마이그레이션 전 완료 회차라 metric_details·filler_counts·feedback_counts가 None이면
+    '세부 항목 측정 없음'으로 두어 M1·M3 전체/카테고리 점수에는 포함하고 M2 세부 집계에서만 뺀다.
+    기존 회차 백필은 CLI(`python -m app.tools.recompute --backfill`)로 수행한다.
+    """
     stmt = (
         select(
-            Analysis.id,
-            Analysis.presentation_id,
-            Presentation.title,
-            Presentation.purpose,
-            Analysis.attempt_no,
-            Analysis.created_at,
-            Analysis.completed_at,
-            Analysis.duration_sec,
-            Analysis.overall_score,
-            Analysis.grade,
-            Analysis.scores,
-            Analysis.metric_details,
-            Analysis.filler_counts,
-            Analysis.feedback_counts,
+            Analysis.id.label("analysis_id"),
+            Analysis.presentation_id.label("presentation_id"),
+            Presentation.title.label("presentation_title"),
+            Presentation.purpose.label("purpose"),
+            Analysis.attempt_no.label("attempt_no"),
+            Analysis.created_at.label("created_at"),
+            Analysis.completed_at.label("completed_at"),
+            Analysis.duration_sec.label("duration_sec"),
+            Analysis.overall_score.label("overall_score"),
+            Analysis.grade.label("grade"),
+            Analysis.scores.label("scores"),
+            Analysis.metric_details.label("metric_details"),
+            Analysis.filler_counts.label("filler_counts"),
+            Analysis.feedback_counts.label("feedback_counts"),
         )
         .join(Presentation, Presentation.id == Analysis.presentation_id)
         .where(
@@ -62,55 +67,30 @@ def _query_rows(db: Session, user_id: str) -> list:
         )
         .order_by(Analysis.completed_at.asc(), Analysis.created_at.asc(), Analysis.id.asc())
     )
-    return list(db.execute(stmt).all())
-
-
-def _load_completed_records(db: Session, user_id: str) -> list[CompletedRecord]:
-    """사용자의 완료된 회차 요약 컬럼만 단일 조인 쿼리로 읽는다(Report.data는 읽지 않음).
-
-    만약 마이그레이션 0006 직후 아직 백필되지 않은 레코드(metric_details가 None)가 발견되면
-    최초 1회 자동 백필하여 지표 누락을 막는다.
-    """
-    rows = _query_rows(db, user_id)
-    if any(r[11] is None for r in rows):
-        backfill_analysis_summary(db, dry_run=False, allow_old_version=True)
-        rows = _query_rows(db, user_id)
     out: list[CompletedRecord] = []
-    for row in rows:
-        (
-            aid,
-            pid,
-            title,
-            purpose_raw,
-            attempt_no,
-            created_at,
-            completed_at,
-            duration_sec,
-            overall_score,
-            grade,
-            scores,
-            metric_details,
-            filler_counts,
-            feedback_counts,
-        ) = row
-        comp = completed_at or created_at
-        score_int = int(overall_score)
+    for row in db.execute(stmt):
+        m = row._mapping
+        comp = m["completed_at"] or m["created_at"]
+        score_int = int(m["overall_score"])
+        md = m["metric_details"]
+        fc = m["filler_counts"]
+        fbc = m["feedback_counts"]
         out.append(
             CompletedRecord(
-                analysis_id=aid,
-                presentation_id=pid,
-                presentation_title=title,
-                purpose=Purpose(purpose_raw),
-                attempt_no=int(attempt_no),
-                created_at=created_at,
+                analysis_id=m["analysis_id"],
+                presentation_id=m["presentation_id"],
+                presentation_title=m["presentation_title"],
+                purpose=Purpose(m["purpose"]),
+                attempt_no=int(m["attempt_no"]),
+                created_at=m["created_at"],
                 completed_at=comp,
-                duration_sec=float(duration_sec or 0.0),
+                duration_sec=float(m["duration_sec"] or 0.0),
                 overall_score=score_int,
-                grade=grade or grade_for(score_int),
-                scores=dict(scores or {}),
-                metric_details=dict(metric_details or {}),
-                filler_counts=list(filler_counts or []),
-                feedback_counts=dict(feedback_counts or {}),
+                grade=m["grade"] or grade_for(score_int),
+                scores=dict(m["scores"] or {}),
+                metric_details=dict(md) if md is not None else None,
+                filler_counts=list(fc) if fc is not None else None,
+                feedback_counts=dict(fbc) if fbc is not None else None,
             )
         )
     return out

@@ -141,9 +141,9 @@ class CompletedRecord:
     overall_score: int
     grade: str
     scores: dict[str, int]
-    metric_details: dict[str, dict[str, float | None] | None] = field(default_factory=dict)
-    filler_counts: list[dict[str, Any]] = field(default_factory=list)
-    feedback_counts: dict[str, int] = field(default_factory=dict)
+    metric_details: dict[str, dict[str, float | None] | None] | None = field(default_factory=dict)
+    filler_counts: list[dict[str, Any]] | None = field(default_factory=list)
+    feedback_counts: dict[str, int] | None = field(default_factory=dict)
 
 
 def round_int(x: float) -> int:

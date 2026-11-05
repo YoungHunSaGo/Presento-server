@@ -237,21 +237,24 @@ def _metric_details_from_report_json(
 def history_values(
     data: dict[str, Any],
     metric_details: dict[str, dict[str, float | None] | None] | None = None,
+    *,
+    compute_fallback: bool = True,
 ) -> dict[str, Any]:
     """P2·P3·P7 및 M1~M3 마이페이지가 쓰는 회차 요약값(Analysis 컬럼)."""
     sp = data["metrics"]["speech"]
     fb_counts = Counter(f["type"] for f in data.get("feedbacks", []))
     overall_score = int(data["overall"]["score"])
     grade = data["overall"].get("grade") or grade_for(overall_score)
+    resolved_details = (
+        metric_details
+        if metric_details is not None or not compute_fallback
+        else _metric_details_from_report_json(data)
+    )
     return {
         "overall_score": overall_score,
         "grade": grade,
         "scores": {s["category"]: s["score"] for s in data["scores"]},
-        "metric_details": (
-            metric_details
-            if metric_details is not None
-            else _metric_details_from_report_json(data)
-        ),
+        "metric_details": resolved_details,
         "filler_counts": [
             {"word": str(item["word"]), "count": int(item["count"])}
             for item in sp.get("fillers", [])

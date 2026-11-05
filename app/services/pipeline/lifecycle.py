@@ -120,6 +120,8 @@ def complete(
     now: datetime,
     artifacts: dict[str, Any] | None = None,
     metric_details: dict[str, dict[str, float | None] | None] | None = None,
+    *,
+    compute_fallback: bool = True,
     **extra: Any,
 ) -> None:
     """리포트 저장 + 회차 요약값(P2·P3·P7 및 마이페이지) 갱신. extra는 Analysis 컬럼(해시 등).
@@ -135,7 +137,9 @@ def complete(
             progress=100,
             duration_sec=round(duration, 2),
             completed_at=now,
-            **history_values(report, metric_details=metric_details),
+            **history_values(
+                report, metric_details=metric_details, compute_fallback=compute_fallback
+            ),
             **extra,
         )
     )

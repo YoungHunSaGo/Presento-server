@@ -31,7 +31,6 @@
 STALE_WORKDIR_SEC보다 오래된 임시 폴더를 지운다.
 """
 
-import contextlib
 import copy
 import hashlib
 import json
@@ -272,6 +271,52 @@ def cleanup_stale_workdirs(base: Path, now: float | None = None) -> int:
     return removed
 
 
+def _resolve_reused_metric_details(
+    aid: str,
+    analysis: Analysis,
+    same_analysis: Analysis | None,
+    same_art_data: dict[str, Any] | None,
+    reused_report: dict[str, Any],
+) -> dict[str, dict[str, float | None] | None] | None:
+    """재사용 회차의 세부 지표(metric_details)를 구한다.
+
+    1) 원본 회차에 이미 metric_details가 있으면 그대로 복사한다.
+    2) 없으면 원본 아티팩트(same_art_data)로 다시 계산한다.
+    3) 아티팩트도 없거나 실패하면 리포트 JSON으로 계산하고, 그것도 안 되면 경고 로그만 남기고 None.
+    """
+    if same_analysis is not None and same_analysis.metric_details is not None:
+        return copy.deepcopy(same_analysis.metric_details)
+    if same_art_data is not None:
+        from app.services.pipeline.artifacts import _rebuild_with_details
+
+        try:
+            _, _, details = _rebuild_with_details(
+                same_art_data,
+                analysis_id=analysis.id,
+                presentation_id=analysis.presentation_id,
+                attempt_no=analysis.attempt_no,
+                created_at=analysis.created_at,
+            )
+            return details
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Could not rebuild metric_details from artifact for %s (%s); trying fallback",
+                aid,
+                type(e).__name__,
+            )
+    from app.services.pipeline.report import _metric_details_from_report_json
+
+    try:
+        return _metric_details_from_report_json(reused_report)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "Could not derive metric_details for reused analysis %s (%s); leaving as None",
+            aid,
+            type(e).__name__,
+        )
+        return None
+
+
 def _execute(
     db: Session, analysis: Analysis, p: Presentation, tmp: Path, deps: PipelineDeps
 ) -> None:
@@ -297,28 +342,15 @@ def _execute(
 
     same = _previous(db, p.user_id, aid, cache_key=cache_key) if cache_key else None
     same_analysis = db.get(Analysis, same.analysis_id) if same is not None else None
-    same_metric_details = (
-        copy.deepcopy(same_analysis.metric_details)
-        if same_analysis is not None and same_analysis.metric_details is not None
-        else None
-    )
     same_art = db.get(AnalysisArtifact, same.analysis_id) if same is not None else None
     same_art_data = copy.deepcopy(same_art.data) if same_art is not None else None
-    if same_metric_details is None and same_art_data is not None:
-        from app.services.pipeline.artifacts import _rebuild_with_details
-
-        with contextlib.suppress(Exception):
-            _, _, same_metric_details = _rebuild_with_details(
-                same_art_data,
-                analysis_id=analysis.id,
-                presentation_id=analysis.presentation_id,
-                attempt_no=analysis.attempt_no,
-                created_at=analysis.created_at,
-            )
     db.commit()  # 읽기 트랜잭션을 길게 열어 두지 않는다
     reused = _try_rebase(same.data, analysis) if same is not None else None
     if reused is not None:
         logger.info("Analysis %s reuses a previous report (same video and settings)", aid)
+        same_metric_details = _resolve_reused_metric_details(
+            aid, analysis, same_analysis, same_art_data, reused
+        )
         # 중간 결과도 함께 복사해 이 회차도 재계산할 수 있게 한다(원본 회차를 지워도 남는다).
         complete(
             db,
@@ -328,6 +360,7 @@ def _execute(
             deps.now(),
             artifacts=same_art_data,
             metric_details=same_metric_details,
+            compute_fallback=False,
             **extra,
         )
         return
