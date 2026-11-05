@@ -173,7 +173,7 @@ def test_oversized_upload_cleanup_goes_through_worker(
     client, uploaded, auth_headers, storage, queue
 ):
     aid = uploaded()
-    storage.objects[f"videos/{aid}"] = 500 * 1024 * 1024 + 1
+    storage.objects[f"videos/{aid}"] = 2 * 1024 * 1024 * 1024 + 1
     res = client.post(f"{API}/analyses/{aid}/start", headers=auth_headers)
     assert res.status_code == 413
     assert queue.deleted_keys == {f"videos/{aid}"}

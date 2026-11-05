@@ -87,6 +87,12 @@ def _video_too_long() -> AppError:
     return AppError("VIDEO_TOO_LONG", VIDEO_TOO_LONG_MESSAGE, 422)
 
 
+def _size_label(n: int) -> str:
+    """바이트 수를 안내 문구용으로 쓴다. GB로 나누어떨어지면 GB, 아니면 MB."""
+    gb, mb = 1024**3, 1024**2
+    return f"{n // gb}GB" if n % gb == 0 else f"{n // mb}MB"
+
+
 def _storage_error() -> AppError:
     return AppError(
         "INTERNAL_ERROR", "파일 저장소에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.", 500
@@ -117,7 +123,7 @@ def create_analysis(
     if body.file_size > settings.max_video_bytes:
         raise AppError(
             "FILE_TOO_LARGE",
-            f"영상은 {settings.max_video_bytes // (1024 * 1024)}MB 이하만 업로드할 수 있어요.",
+            f"영상은 {_size_label(settings.max_video_bytes)} 이하만 업로드할 수 있어요.",
             413,
         )
 
@@ -209,7 +215,7 @@ def start_analysis(
         delete_objects_later(queue, storage, [key])
         raise AppError(
             "FILE_TOO_LARGE",
-            f"영상은 {settings.max_video_bytes // (1024 * 1024)}MB 이하만 업로드할 수 있어요.",
+            f"영상은 {_size_label(settings.max_video_bytes)} 이하만 업로드할 수 있어요.",
             413,
         )
 

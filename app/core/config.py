@@ -58,7 +58,7 @@ class Settings(BaseSettings):
 
     # 비용 보호
     max_video_seconds: int = 600
-    max_video_bytes: int = 524_288_000
+    max_video_bytes: int = 2_147_483_648
     max_slides_bytes: int = 20 * 1024 * 1024
     daily_analysis_limit: int = 20
 
