@@ -92,8 +92,59 @@ def test_gesture_score(gpm, score):
 
 def test_content_penalties():
     d = sc.content_details(content(structure=2, clarity=3))
-    assert d == {"structure": 70.0, "clarity": 70.0}
+    assert d == {"structure": 70.0, "clarity": 70.0, "language": 100.0}
     assert sc.content_details(content(structure=10))["structure"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("prof_count", "serious", "minor", "expected_penalty", "expected_lang_detail"),
+    [
+        (0, 0, 0, 0.0, 100.0),
+        (1, 0, 0, 40.0, 60.0),
+        (3, 0, 0, 70.0, 30.0),  # 첫 1회 -40 + 추가 2회(-15×2) = -70
+        (0, 1, 1, 40.0, 60.0),  # SERIOUS(-30) + MINOR(-10) = -40
+        (1, 1, 1, 80.0, 20.0),  # 욕설 1회(-40) + SERIOUS(-30) + MINOR(-10) = -80
+        (3, 2, 0, 130.0, 0.0),  # 100점 초과 감점도 0점 미만으로 내려가지 않는다
+    ],
+)
+def test_language_penalties_and_clamp(
+    prof_count, serious, minor, expected_penalty, expected_lang_detail
+):
+    from app.services.pipeline.content import LanguageSeverity
+    from app.services.pipeline.profanity_ko import ProfanityHit, ProfanityResult
+
+    # structure=85, clarity=100 -> 평균 92.5
+    issues = [ContentIssue(IssueType.STRUCTURE, ["s-001"], 0, 1, "x")]
+    issues += [
+        ContentIssue(IssueType.LANGUAGE, ["s-001"], 0, 1, "x", severity=LanguageSeverity.SERIOUS)
+    ] * serious
+    issues += [
+        ContentIssue(IssueType.LANGUAGE, ["s-001"], 0, 1, "x", severity=LanguageSeverity.MINOR)
+    ] * minor
+    ct = ContentAnalysis(
+        sections=[],
+        key_message="핵심",
+        issues=issues,
+        slide_coverage=None,
+        expected_questions=[],
+        usage=None,
+    )
+    hits = tuple(ProfanityHit("x같네요", "x같", 0.0, 1.0, "s-001") for _ in range(prof_count))
+    sp = speech()
+    sp = SpeechAnalysis(**{**sp.__dict__, "profanity": ProfanityResult(hits=hits)})
+
+    assert sc.language_penalty(ct, prof_count) == pytest.approx(expected_penalty)
+    d = sc.content_details(ct, profanity_count=prof_count)
+    assert d["language"] == pytest.approx(expected_lang_detail)
+
+    r = sc.score_presentation(Purpose.CLASS, sp, nonverbal(), ct)
+    assert 0 <= r.categories[C] <= 100
+    expected_c = sc._round_int(max(0.0, 92.5 - expected_penalty))
+    assert r.categories[C] == expected_c
+    if expected_penalty == 0:
+        # 언어 문제가 없으면 기존 점수와 완전히 같다
+        baseline = sc.score_presentation(Purpose.CLASS, speech(), nonverbal(), content(structure=1))
+        assert r.categories == baseline.categories and r.overall == baseline.overall
 
 
 # ---------- 측정 불가 → 가중치 재분배 ----------

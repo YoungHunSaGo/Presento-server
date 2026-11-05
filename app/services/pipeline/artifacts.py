@@ -8,10 +8,15 @@
 - content: LLM 응답 원본(raw)과 후처리한 결과(result)
 - feedback: LLM 응답 원본(raw), 후처리한 결과(result), 그때의 피드백 후보(candidates)
 
-재계산(recompute): 대본·관측값으로 말하기·비언어 지표를 다시 계산하고, 저장된
+재계산(recompute): 대본·관측값으로 말하기(욕설·비속어 사전 포함)·비언어 지표를 다시 계산하고, 저장된
 content·feedback 결과로 점수(scoring)와 리포트(report)를 다시 조립한다.
-피드백 문장은 저장된 것을 그대로 쓴다(문장 안 숫자는 처음 분석 때 값이다.
-지표 기준을 바꿔 후보가 달라져도 문장을 새로 쓰지 않는다).
+- 욕설·비속어 사전(profanity_ko) 감점은 대본(stt.transcript)으로 결정적으로 계산하므로 기존 분석을
+  recompute해도 즉시 반영된다.
+- 반면 LLM의 부적절 태도·언어 판정(content_system_v3의 LANGUAGE: SERIOUS/MINOR)은 새 분석부터
+  적용되며, 이전 프롬프트로 분석된 기존 회차의 recompute에는 LLM LANGUAGE 판정이 없다
+  (사전 감점만 적용).
+- 피드백 문장은 저장된 것을 그대로 쓴다(문장 안 숫자는 처음 분석 때 값이다.
+  지표 기준을 바꿔 후보가 달라져도 문장을 새로 쓰지 않는다).
 
 사용자 대본이 들어 있으므로 회차·발표를 지우면 함께 지운다(모델의 cascade).
 """
@@ -36,6 +41,7 @@ from app.schemas.report import (
 from app.services.pipeline import content as content_mod
 from app.services.pipeline import feedback as feedback_mod
 from app.services.pipeline.nonverbal import FrameObs, HeadTurn, PoseObs, analyze_nonverbal
+from app.services.pipeline.profanity_ko import ProfanityResult, detect_profanity, profanity_to_json
 from app.services.pipeline.report import ReportParts, build_report, history_values
 from app.services.pipeline.scoring import score_presentation
 from app.services.pipeline.speech_metrics import analyze_speech
@@ -129,6 +135,7 @@ def content_to_json(c: content_mod.ContentAnalysis) -> dict[str, Any]:
                 "start": i.start,
                 "end": i.end,
                 "reason": i.reason,
+                "severity": i.severity.value if i.severity is not None else None,
             }
             for i in c.issues
         ],  # fmt: skip
@@ -143,6 +150,7 @@ def content_to_json(c: content_mod.ContentAnalysis) -> dict[str, Any]:
         "droppedItems": c.dropped_items,
         "slidesMissingPages": c.slides_missing_pages,
         "slidesTruncated": c.slides_truncated,
+        "promptVersion": c.prompt_version,
     }
 
 
@@ -166,6 +174,9 @@ def content_from_json(d: dict[str, Any]) -> content_mod.ContentAnalysis:
                 start=i["start"],
                 end=i["end"],
                 reason=i["reason"],
+                severity=(
+                    content_mod.LanguageSeverity(i["severity"]) if i.get("severity") else None
+                ),
             )
             for i in d["issues"]
         ],  # fmt: skip
@@ -180,6 +191,7 @@ def content_from_json(d: dict[str, Any]) -> content_mod.ContentAnalysis:
         dropped_items=d.get("droppedItems", 0),
         slides_missing_pages=list(d.get("slidesMissingPages", [])),
         slides_truncated=d.get("slidesTruncated", False),
+        prompt_version=d.get("promptVersion", content_mod.PROMPT_NAME),
     )
 
 
@@ -193,6 +205,7 @@ def _candidate_to_json(c: feedback_mod.Candidate) -> dict[str, Any]:
         "values": c.values,
         "segmentIds": list(c.segment_ids),
         "context": c.context,
+        "priority": c.priority,
     }
 
 
@@ -206,6 +219,7 @@ def _candidate_from_json(d: dict[str, Any]) -> feedback_mod.Candidate:
         segment_ids=tuple(d["segmentIds"]),
         context=d.get("context"),
         id=d["id"],
+        priority=int(d.get("priority", 0)),
     )
 
 
@@ -250,7 +264,9 @@ def build_artifacts(
     frames: list[FrameObs],
     content: content_mod.ContentAnalysis,
     feedback: feedback_mod.FeedbackResult,
+    profanity: ProfanityResult | None = None,
 ) -> dict[str, Any]:
+    prof = profanity if profanity is not None else detect_profanity(transcript)
     return {
         "formatVersion": FORMAT_VERSION,
         "input": {
@@ -260,7 +276,7 @@ def build_artifacts(
             "timeLimitSec": time_limit_sec,
         },
         "stt": {"transcript": transcript.model_dump(mode="json", by_alias=True)},
-        "speech": speech_metrics,
+        "speech": {**speech_metrics, "profanity": profanity_to_json(prof)},
         "nonverbal": {"frames": [_frame_to_json(f) for f in frames]},
         "content": {"raw": content.raw, "result": content_to_json(content)},
         "feedback": {

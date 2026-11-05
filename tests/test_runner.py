@@ -449,7 +449,7 @@ def test_end_to_end_with_real_llm_modules(world, db):
     world.deps.llm_client = lambda: llm
     aid = world.make(limit=60)
     assert world.run(aid) == "completed"
-    assert llm.names == ["content_analysis_v2", "feedback_v2"]  # 각 1번
+    assert llm.names == [f"content_analysis_{content.PROMPT_VERSION}", "feedback_v2"]  # 각 1번
     report = db.get(Report, aid).data
     validate_report(report)
     assert report["overall"]["summary"] == "전체적으로 좋아요."

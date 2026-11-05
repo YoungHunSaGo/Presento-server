@@ -26,7 +26,7 @@
 import math
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.schemas.report import (
     FillerStat,
@@ -38,6 +38,7 @@ from app.schemas.report import (
     WordTag,
 )
 from app.services.pipeline.fillers_ko import ALWAYS_FILLERS, CONTEXT_FILLERS, CONTEXT_PAUSE_SEC
+from app.services.pipeline.profanity_ko import ProfanityResult, detect_profanity
 
 SILENCE_SEC = 2.0
 PACE_WINDOW_SEC = 30
@@ -82,6 +83,7 @@ class SpeechAnalysis:
     under_time_sec: float  # 제한 시간보다 짧은 초(제한 없으면 0)
     time_used_ratio: float | None  # 발표 시간 / 제한 시간(제한 없으면 None)
     is_under_time: bool
+    profanity: ProfanityResult = field(default_factory=ProfanityResult)
 
 
 def word_core(text: str) -> str:
@@ -308,4 +310,5 @@ def analyze_speech(
         under_time_sec=under,
         time_used_ratio=ratio,
         is_under_time=is_under,
+        profanity=detect_profanity(transcript),
     )

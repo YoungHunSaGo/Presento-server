@@ -55,7 +55,8 @@ from app.services.pipeline.llm import LlmClient
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "v2"  # 지시문(content_system_*.md)
+PROMPT_VERSION = "v3"  # 지시문(content_system_*.md)
+PROMPT_NAME = f"content_system_{PROMPT_VERSION}"
 RUBRIC_VERSION = "v1"  # 목적별 루브릭(content_rubric_*_*.md)
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 
@@ -113,6 +114,12 @@ class SectionKind(StrEnum):
 class IssueType(StrEnum):
     STRUCTURE = "STRUCTURE"
     CLARITY = "CLARITY"
+    LANGUAGE = "LANGUAGE"
+
+
+class LanguageSeverity(StrEnum):
+    SERIOUS = "SERIOUS"
+    MINOR = "MINOR"
 
 
 @dataclass(frozen=True)
@@ -131,6 +138,7 @@ class ContentIssue:
     start: float
     end: float
     reason: str
+    severity: LanguageSeverity | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +163,7 @@ class ContentAnalysis:
     # LLM이 판단을 빠뜨린 페이지, 페이지 상한(MAX_SLIDE_PAGES)으로 보내지 않은 페이지가 있는지
     slides_missing_pages: list[int] = field(default_factory=list)
     slides_truncated: bool = False
+    prompt_version: str = PROMPT_NAME
     raw: dict[str, Any] | None = None  # 채택한 LLM 응답 원본(중간 결과 저장·재계산용)
 
 
@@ -185,9 +194,10 @@ class _Sections(_Strict):
 
 
 class _Issue(_Strict):
-    type: Literal["STRUCTURE", "CLARITY"]
+    type: Literal["STRUCTURE", "CLARITY", "LANGUAGE"]
     segmentIds: list[str]  # noqa: N815
     reason: str
+    severity: Literal["SERIOUS", "MINOR"] | None = None
 
 
 class _Slide(_Strict):
@@ -241,9 +251,10 @@ RESPONSE_SCHEMA: dict[str, Any] = _obj(
             "type": "array",
             "items": _obj(
                 {
-                    "type": {"type": "string", "enum": ["STRUCTURE", "CLARITY"]},
+                    "type": {"type": "string", "enum": ["STRUCTURE", "CLARITY", "LANGUAGE"]},
                     "segmentIds": {"type": "array", "items": _STR},
                     "reason": _STR,
+                    "severity": _nullable({"type": "string", "enum": ["SERIOUS", "MINOR"]}),
                 }
             ),
         },
@@ -494,14 +505,26 @@ def _issues(raw: list[_Issue], post: _Post) -> list[ContentIssue]:
             post.dropped += 1
             continue
         start, end = post.times(ids)
+        itype = IssueType(item.type)
+        sev: LanguageSeverity | None = None
+        if itype is IssueType.LANGUAGE:
+            sev = LanguageSeverity(item.severity) if item.severity else LanguageSeverity.MINOR
         out.append(
             ContentIssue(
-                type=IssueType(item.type), segment_ids=ids, start=start, end=end, reason=reason
+                type=itype,
+                segment_ids=ids,
+                start=start,
+                end=end,
+                reason=reason,
+                severity=sev,
             )
         )
     if len(out) > MAX_ISSUES:
         post.dropped += len(out) - MAX_ISSUES
-        out = out[:MAX_ISSUES]
+        lang = [i for i in out if i.type is IssueType.LANGUAGE]
+        others = [i for i in out if i.type is not IssueType.LANGUAGE]
+        kept = {id(x) for x in (lang + others)[:MAX_ISSUES]}
+        out = [i for i in out if id(i) in kept]
     return out
 
 

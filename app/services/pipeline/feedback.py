@@ -53,10 +53,16 @@ from app.schemas.report import (
     Transcript,
 )
 from app.services.pipeline import llm
-from app.services.pipeline.content import ContentAnalysis, IssueType, build_transcript_block
+from app.services.pipeline.content import (
+    ContentAnalysis,
+    IssueType,
+    LanguageSeverity,
+    build_transcript_block,
+)
 from app.services.pipeline.korean_style import to_haeyo
 from app.services.pipeline.llm import LlmClient
 from app.services.pipeline.nonverbal import NonverbalAnalysis
+from app.services.pipeline.profanity_ko import contains_profanity, detect_profanity
 from app.services.pipeline.speech_metrics import SpeechAnalysis
 
 logger = logging.getLogger(__name__)
@@ -200,6 +206,7 @@ class Candidate:
     segment_ids: tuple[str, ...] = ()
     context: str | None = None  # content 계열: content 모듈이 쓴 이유(LLM 참고용)
     id: str = ""  # 정리 뒤 c-01, c-02 …
+    priority: int = 0  # 같은 type·심각도 안에서 우선순위(언어·태도 문제는 일반 CLARITY보다 우선)
 
     @property
     def category(self) -> ScoreCategory:
@@ -454,15 +461,65 @@ def _nonverbal_candidates(data: FeedbackInput) -> list[Candidate]:
     return out
 
 
+_LANGUAGE_GUIDANCE = (
+    "비난하지 말고 '발표 자리에서는 이 표현 대신 ~'처럼 대체 표현을 제안하고, "
+    "욕설·비속어 단어 자체를 제목·설명·제안에 반복하지 마세요."
+)
+
+
+def _profanity_candidates(data: FeedbackInput) -> list[Candidate]:
+    prof = (
+        data.speech.profanity
+        if data.speech.profanity.hits
+        else detect_profanity(data.transcript)
+    )
+    if not prof.hits:
+        return []
+    seg_by_id = {s.id: s for s in data.transcript.segments}
+    seen_segs: list[str] = list(dict.fromkeys(h.segment_id for h in prof.hits))
+    out: list[Candidate] = []
+    for sid in seen_segs:
+        seg = seg_by_id.get(sid)
+        if seg is None:
+            continue
+        out.append(
+            Candidate(
+                type=FeedbackType.CLARITY,
+                severity=Severity.CRITICAL,
+                start=seg.start,
+                end=seg.end,
+                segment_ids=(seg.id,),
+                context=f"발표 자리에 맞지 않는 비속어·욕설 표현이 있어요. {_LANGUAGE_GUIDANCE}",
+                priority=2,
+            )
+        )
+    return out
+
+
 def _content_candidates(data: FeedbackInput) -> list[Candidate]:
     if data.content is None:
         return []
     out: list[Candidate] = []
     for issue in data.content.issues:
-        ftype = (
-            FeedbackType.STRUCTURE if issue.type is IssueType.STRUCTURE else FeedbackType.CLARITY
-        )
-        sev = Severity.WARNING if ftype is FeedbackType.STRUCTURE else Severity.INFO
+        if issue.type is IssueType.LANGUAGE:
+            ftype = FeedbackType.CLARITY
+            sev = (
+                Severity.CRITICAL
+                if issue.severity is LanguageSeverity.SERIOUS
+                else Severity.WARNING
+            )
+            prio = 2 if issue.severity is LanguageSeverity.SERIOUS else 1
+            ctx = f"{issue.reason} ({_LANGUAGE_GUIDANCE})"
+        elif issue.type is IssueType.STRUCTURE:
+            ftype = FeedbackType.STRUCTURE
+            sev = Severity.WARNING
+            prio = 0
+            ctx = issue.reason
+        else:
+            ftype = FeedbackType.CLARITY
+            sev = Severity.INFO
+            prio = 0
+            ctx = issue.reason
         out.append(
             Candidate(
                 type=ftype,
@@ -470,7 +527,8 @@ def _content_candidates(data: FeedbackInput) -> list[Candidate]:
                 start=issue.start,
                 end=issue.end,
                 segment_ids=tuple(issue.segment_ids),
-                context=issue.reason,
+                context=ctx,
+                priority=prio,
             )
         )
     return out
@@ -484,13 +542,15 @@ def build_candidates(data: FeedbackInput) -> list[Candidate]:
         + _silence_candidates(data)
         + _time_candidates(data)
         + _nonverbal_candidates(data)
+        + _profanity_candidates(data)
         + _content_candidates(data)
     )
     order = {s.id: i for i, s in enumerate(data.transcript.segments)}
     clipped = [c for c in (_clip(c, data.duration_sec) for c in raw) if c is not None]
     merged = _merge(clipped, order)
     ranked = sorted(
-        merged, key=lambda c: (-_SEVERITY_RANK[c.severity], -(c.end - c.start), c.start)
+        merged,
+        key=lambda c: (-_SEVERITY_RANK[c.severity], -c.priority, -(c.end - c.start), c.start),
     )
     chosen: list[Candidate] = []
     per_type: dict[FeedbackType, int] = {}
@@ -571,7 +631,8 @@ def _merge(cands: list[Candidate], order: dict[str, int]) -> list[Candidate]:
         items.sort(key=lambda c: c.start)
         cur = items[0]
         for nxt in items[1:]:
-            if nxt.start - cur.end <= MERGE_GAP_SEC:
+            same_group = (cur.priority > 0) == (nxt.priority > 0)
+            if same_group and nxt.start - cur.end <= MERGE_GAP_SEC:
                 start, end = cur.start, max(cur.end, nxt.end)
                 values = _merge_values(ftype, cur.values, nxt.values, start, end)
                 ids = sorted(
@@ -589,6 +650,7 @@ def _merge(cands: list[Candidate], order: dict[str, int]) -> list[Candidate]:
                     values=values,
                     segment_ids=tuple(ids),
                     context=" / ".join(dict.fromkeys(contexts)) or None,
+                    priority=max(cur.priority, nxt.priority),
                 )
             else:
                 out.append(cur)
@@ -627,6 +689,16 @@ def _evidence(c: Candidate, transcript: Transcript) -> str | None:
         return best.text
     run = _first_run(c.segment_ids, order)
     return segs[run[0]].text if run else None
+
+
+def verify_evidence(evidence: str | None, transcript: Transcript) -> bool:
+    """evidence 문장이 실제 대본에 있는지(공백 정규화 후 부분 일치) 확인한다."""
+    if evidence is None:
+        return True
+    norm_ev = " ".join(evidence.split())
+    norm_full = " ".join(s.text for s in transcript.segments)
+    norm_full = " ".join(norm_full.split())
+    return bool(norm_ev) and norm_ev in norm_full
 
 
 # ---------------------------------------------------------------- 전체 자리표시자
@@ -810,6 +882,10 @@ _RULE_TEXT = {
     "number": "숫자는 자리표시자로만 쓰고, 측정값을 한글 수사로도 쓰지 마세요.",
     "placeholder": "그 후보에 주어진 자리표시자만 쓰세요.",
     "script": "improvedScripts는 원문에 있던 숫자만 쓰고, reason에는 숫자를 쓰지 마세요.",
+    "profanity": (
+        "욕설·비속어 단어를 제목·설명·제안에 그대로 반복하지 말고, "
+        "'발표 자리에서는 이 표현 대신 ~'처럼 대체 표현을 제안하세요."
+    ),
 }
 
 
@@ -818,6 +894,10 @@ def _fill_noting(text: str, values: dict[str, Any], quoted: str, problems: set[s
     if filled is None:
         unknown = any(n not in values for n in _PLACEHOLDER.findall(text))
         problems.add("placeholder" if unknown else "number")
+        return None
+    if contains_profanity(filled):
+        problems.add("profanity")
+        return None
     return filled
 
 
@@ -837,6 +917,8 @@ def _check(
             continue
         values = {**gv, **c.values}
         evidence = _evidence(c, data.transcript)
+        if not verify_evidence(evidence, data.transcript):
+            evidence = None
         title, desc, sugg = (
             _fill_noting(t, values, evidence or "", problems)
             for t in (item.title, item.description, item.suggestion)
@@ -910,6 +992,8 @@ def _check(
             or not reason
             or _DIGIT.search(reason)
             or "{" in reason
+            or contains_profanity(text)
+            or contains_profanity(reason)
         ):
             dropped += 1
             violations += 1

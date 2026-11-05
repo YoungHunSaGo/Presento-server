@@ -7,14 +7,15 @@
 - DELIVERY: 말 속도(분당 음절, 이상 구간이면 100), 추임새(분당 개수), 긴 침묵(분당 횟수),
   시간(제한 시간 대비 발표 시간, 제한이 없으면 측정 불가)
 - NONVERBAL: 시선(정면 비율), 자세(안정성), 제스처(분당 손동작, 적정 구간이면 100)
-- CONTENT: 구조(STRUCTURE 후보 수), 명확성(CLARITY 후보 수). 후보 하나마다 감점.
+- CONTENT: 구조(STRUCTURE 후보 수), 명확성(CLARITY 후보 수) 가중 평균에서
+  언어 감점(욕설·비속어 사전 및 LLM LANGUAGE 판정)을 빼고 0~100으로 자른다.
 """
 
 import math
 from dataclasses import dataclass
 
 from app.models.enums import Purpose, ScoreCategory
-from app.services.pipeline.content import ContentAnalysis, IssueType
+from app.services.pipeline.content import ContentAnalysis, IssueType, LanguageSeverity
 from app.services.pipeline.nonverbal import NonverbalAnalysis
 from app.services.pipeline.speech_metrics import SpeechAnalysis
 
@@ -48,9 +49,13 @@ GESTURE_IDEAL_HIGH = 12.0
 GESTURE_NONE_SCORE = 50  # 손동작이 전혀 없을 때(0 이하)
 GESTURE_ZERO_HIGH = 40.0
 
-# ---- 내용(후보 하나당 감점) ----
+# ---- 내용(후보 하나당 감점 및 부적절 언어 감점, 마일스톤 6 평가셋으로 조정 예정) ----
 STRUCTURE_PENALTY = 15
 CLARITY_PENALTY = 10
+PROFANITY_FIRST_PENALTY = 40
+PROFANITY_EXTRA_PENALTY = 15
+LANGUAGE_SERIOUS_PENALTY = 30
+LANGUAGE_MINOR_PENALTY = 10
 
 NEUTRAL_SCORE = 70  # 세부 지표가 하나도 없는 카테고리(종합 점수에서는 제외)
 
@@ -205,14 +210,40 @@ def nonverbal_details(nv: NonverbalAnalysis | None) -> dict[str, float | None]:
     return {"gaze": gaze, "posture": posture, "gesture": gesture}
 
 
-def content_details(content: ContentAnalysis | None) -> dict[str, float | None]:
+def language_penalty(content: ContentAnalysis | None = None, profanity_count: int = 0) -> float:
+    """욕설·비속어(사전)와 부적절한 발표 태도·표현(LLM LANGUAGE)의 CONTENT 감점 합계."""
+    prof = (
+        PROFANITY_FIRST_PENALTY + PROFANITY_EXTRA_PENALTY * (profanity_count - 1)
+        if profanity_count > 0
+        else 0
+    )
     if content is None:
-        return {"structure": None, "clarity": None}
+        return float(prof)
+    n_serious = sum(
+        1
+        for i in content.issues
+        if i.type is IssueType.LANGUAGE and i.severity is LanguageSeverity.SERIOUS
+    )
+    n_minor = sum(
+        1
+        for i in content.issues
+        if i.type is IssueType.LANGUAGE and i.severity is not LanguageSeverity.SERIOUS
+    )
+    return float(prof + LANGUAGE_SERIOUS_PENALTY * n_serious + LANGUAGE_MINOR_PENALTY * n_minor)
+
+
+def content_details(
+    content: ContentAnalysis | None, profanity_count: int = 0
+) -> dict[str, float | None]:
+    if content is None:
+        return {"structure": None, "clarity": None, "language": None}
     n_struct = sum(1 for i in content.issues if i.type is IssueType.STRUCTURE)
     n_clar = sum(1 for i in content.issues if i.type is IssueType.CLARITY)
+    pen = language_penalty(content, profanity_count)
     return {
         "structure": _clamp(100 - STRUCTURE_PENALTY * n_struct),
         "clarity": _clamp(100 - CLARITY_PENALTY * n_clar),
+        "language": _clamp(100 - pen),
     }
 
 
@@ -229,10 +260,11 @@ def score_presentation(
     nonverbal: NonverbalAnalysis | None,
     content: ContentAnalysis | None,
 ) -> ScoreResult:
+    prof_count = speech.profanity.count
     raw_details = {
         ScoreCategory.DELIVERY: delivery_details(speech),
         ScoreCategory.NONVERBAL: nonverbal_details(nonverbal),
-        ScoreCategory.CONTENT: content_details(content),
+        ScoreCategory.CONTENT: content_details(content, profanity_count=prof_count),
     }
     # 계산할 수 없는 값(NaN·무한대)은 측정 불가(None)로 본다.
     details = {
@@ -247,6 +279,10 @@ def score_presentation(
     raw: dict[ScoreCategory, float | None] = {
         c: weighted(details[c], weights[c]) for c in ScoreCategory
     }
+    if raw[ScoreCategory.CONTENT] is not None:
+        raw[ScoreCategory.CONTENT] = _clamp(
+            raw[ScoreCategory.CONTENT] - language_penalty(content, prof_count)
+        )
     measured = {c: raw[c] is not None for c in ScoreCategory}
     categories = {
         c: _round_int(raw[c]) if raw[c] is not None else NEUTRAL_SCORE  # type: ignore[arg-type]

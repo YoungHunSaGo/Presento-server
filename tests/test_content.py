@@ -678,22 +678,59 @@ def test_missing_pdf_returns_none(tmp_path):
     assert extract_slide_texts(tmp_path / "nope.pdf") is None
 
 
-# ---------- 프롬프트 v2: 해요체, 측정 항목 제외 ----------
+# ---------- 프롬프트 v3: 해요체, 측정 항목 제외, LANGUAGE 판정 ----------
 
 
-def test_system_prompt_v2_rules():
+def test_system_prompt_v3_rules():
     prompt = content.load_system_prompt()
-    assert content.PROMPT_VERSION == "v2"
+    assert content.PROMPT_VERSION == "v3"
     assert "해요체로 통일" in prompt and "합쇼체" in prompt
-    for word in ("추임새", "말 속도", "침묵", "시선", "자세", "제스처"):
+    for word in (
+        "추임새",
+        "말 속도",
+        "침묵",
+        "시선",
+        "자세",
+        "제스처",
+        "LANGUAGE",
+        "SERIOUS",
+        "MINOR",
+    ):
         assert word in prompt
     assert "issues에 넣지 않는다" in prompt
+    # 이전 버전(v2) 파일도 그대로 읽을 수 있다
+    assert "해요체로 통일" in content.load_system_prompt("v2")
 
 
 def test_schema_name_follows_prompt_version(llm_settings):
     client = FakeLlm(response(good_payload()))
-    run(client, settings=llm_settings)
-    assert client.calls[0]["text"]["format"]["name"] == "content_analysis_v2"
+    r = run(client, settings=llm_settings)
+    assert client.calls[0]["text"]["format"]["name"] == "content_analysis_v3"
+    assert r.prompt_version == "content_system_v3"
+
+
+def test_language_issue_severity_parsed(llm_settings):
+    p = good_payload(
+        issues=[
+            {
+                "type": "LANGUAGE",
+                "severity": "SERIOUS",
+                "segmentIds": ["s-001"],
+                "reason": "발표를 거부하는 표현이 있어요.",
+            },
+            {
+                "type": "LANGUAGE",
+                "severity": "MINOR",
+                "segmentIds": ["s-002"],
+                "reason": "반말 표현이 있어요.",
+            },
+        ]
+    )
+    r = run(FakeLlm(response(p)), settings=llm_settings)
+    assert [(i.type, i.severity) for i in r.issues] == [
+        (IssueType.LANGUAGE, content.LanguageSeverity.SERIOUS),
+        (IssueType.LANGUAGE, content.LanguageSeverity.MINOR),
+    ]
 
 
 def test_formal_endings_are_converted_to_haeyo_without_retry(llm_settings, caplog):

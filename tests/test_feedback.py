@@ -978,3 +978,69 @@ def test_clipped_end_is_rounded_to_two_decimals():
     pace = [PacePoint(t=0, value=320), PacePoint(t=30, value=240)]
     (c,) = build_candidates(data(speech=speech(pace=pace), duration_sec=44.517656))
     assert (c.start, c.end) == (30.0, 44.52)
+
+
+def test_language_and_profanity_prioritized_in_clarity_and_profanity_not_repeated(llm_settings):
+    from app.services.pipeline.content import LanguageSeverity
+    from app.services.pipeline.profanity_ko import ProfanityHit, ProfanityResult
+
+    # 일반 CLARITY 4개(s-001, s-003, s-005, s-007) + LANGUAGE 1개(s-009) + 욕설 1개(s-011)
+    ct = content_with(
+        issue(IssueType.CLARITY, ["s-001"], "모호해요 1."),
+        issue(IssueType.CLARITY, ["s-003"], "모호해요 2."),
+        issue(IssueType.CLARITY, ["s-005"], "모호해요 3."),
+        issue(IssueType.CLARITY, ["s-007"], "모호해요 4."),
+        ContentIssue(
+            type=IssueType.LANGUAGE,
+            segment_ids=["s-009"],
+            start=80.0,
+            end=89.5,
+            reason="발표를 거부하는 표현이 있어요.",
+            severity=LanguageSeverity.SERIOUS,
+        ),
+    )
+    sp = speech(
+        profanity=ProfanityResult(
+            hits=(ProfanityHit("x같네요", "x같", 100.0, 105.0, "s-011"),)
+        )
+    )
+    inp = data(speech=sp, content=ct)
+    cands = build_candidates(inp)
+    # CLARITY 상한(MAX_PER_TYPE=4) 안에서도 언어 문제(s-009, s-011)가 최우선으로 살아남는다
+    assert len(cands) == fb.MAX_PER_TYPE == 4
+    seg_sets = [c.segment_ids for c in cands]
+    assert ("s-009",) in seg_sets and ("s-011",) in seg_sets
+
+    # LLM이 실수로 욕설 단어를 설명에 반복하면 거부하고 재시도한다
+    bad_p = {
+        "feedbacks": [
+            item("c-01", "모호해요", "설명이 모호해요."),
+            item("c-02", "모호해요", "근거가 부족해요."),
+            item(
+                "c-03",
+                "발표 태도를 다듬어 보세요",
+                "발표를 포기하는 표현이 있어요.",
+                "발표 자리에서는 이 표현 대신 준비한 핵심만 간단히 말해 보세요.",
+            ),
+            item(
+                "c-04",
+                "부적절한 표현이 있어요",
+                "X같네요 같은 표현은 부적절해요.",  # 욕설 단어 반복 → 위반!
+                "발표 자리에서는 이 표현 대신 정중한 마무리 인사를 써 보세요.",
+            ),
+        ],
+        "overall": {
+            "summary": "표현을 다듬으면 좋아요.",
+            "strengths": ["목소리"],
+            "improvements": ["표현"],
+        },
+        "improvedScripts": [],
+    }
+    good_p = json.loads(json.dumps(bad_p))
+    good_p["feedbacks"][3]["description"] = "발표 자리에 맞지 않는 거친 표현이 있어요."
+    client = FakeLlm(resp(bad_p), resp(good_p))
+    r = generate_feedback(inp, client, llm_settings)
+    assert len(client.calls) == 2
+    assert len(r.feedbacks) == 4
+    assert all(f.type is FeedbackType.CLARITY for f in r.feedbacks)
+    assert all(fb.verify_evidence(f.evidence, inp.transcript) for f in r.feedbacks)

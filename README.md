@@ -46,6 +46,10 @@ docker compose exec worker python -m app.tools.recompute --stats            # �
 
 - 피드백 문장은 저장된 것을 그대로 쓴다. 지표 기준이 바뀌어 피드백 후보가 달라지면
   "피드백 근거 변경됨"을 표시한다(문장 속 수치·구간이 새 지표와 다를 수 있음).
+- 욕설·비속어 사전(`profanity_ko`) 감점은 저장된 대본으로 코드가 즉시 계산하므로 기존 회차를
+  `recompute`해도 바로 반영된다. 반면 LLM의 부적절 태도·언어 판정(`content_system_v3`의
+  `LANGUAGE`: `SERIOUS`/`MINOR`)은 새 분석부터 적용되며, 이전 프롬프트로 분석된 기존 회차의
+  `recompute`에는 LLM `LANGUAGE` 판정이 없다(사전 감점만 적용).
 - 파이프라인 버전(`PIPELINE_VERSION`)이 다른 중간 결과는 거부한다(프레임 추출 방식이 달라 새로 분석한
   결과와 다르다). 그래도 하려면 `--allow-old-version`.
 - 용량: 1분 영상 약 40KB, 10분 영상 약 360KB(추정). 사용자 대본이 들어 있으므로 회차(N6)·발표(P5)를
