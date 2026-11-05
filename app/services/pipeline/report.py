@@ -7,6 +7,7 @@ P2·P3·P7이 쓰는 요약값(overallScore, scores, fillerCount, syllablesPerMi
 """
 
 import math
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -20,12 +21,14 @@ from app.schemas.report import (
     NonverbalMetrics,
     Overall,
     ReportResponse,
+    SpeechMetrics,
+    Transcript,
 )
-from app.services.pipeline.content import ContentAnalysis
+from app.services.pipeline.content import ContentAnalysis, ContentIssue, IssueType
 from app.services.pipeline.feedback import CATEGORY_LABEL, FeedbackResult
 from app.services.pipeline.nonverbal import NonverbalAnalysis
-from app.services.pipeline.scoring import ScoreResult
-from app.services.pipeline.speech_metrics import SpeechAnalysis
+from app.services.pipeline.scoring import ScoreResult, build_metric_details, grade_for
+from app.services.pipeline.speech_metrics import SpeechAnalysis, analyze_speech
 
 CATEGORY_ORDER = (ScoreCategory.DELIVERY, ScoreCategory.NONVERBAL, ScoreCategory.CONTENT)
 
@@ -152,11 +155,109 @@ def _time_values(r: ReportResponse) -> list[tuple[str, float]]:
     return out
 
 
-def history_values(data: dict[str, Any]) -> dict[str, Any]:
-    """P2·P3·P7이 쓰는 회차 요약값(Analysis 컬럼)."""
+def _metric_details_from_report_json(
+    data: dict[str, Any],
+) -> dict[str, dict[str, float | None] | None]:
+    """아티팩트 없이 리포트 JSON만 있을 때 세부 항목 {score, value}를 계산한다."""
+    duration = float(data["durationSec"])
+    sp_data = data["metrics"]["speech"]
+    nv_data = data["metrics"]["nonverbal"]
+    limit = sp_data.get("timeLimitSec")
+    over = float(sp_data.get("overTimeSec") or 0.0)
+    t = Transcript.model_validate(data["transcript"])
+    raw_t = Transcript(
+        segments=[
+            s.model_copy(update={"words": [w.model_copy(update={"tag": None}) for w in s.words]})
+            for s in t.segments
+        ]
+    )
+    speech_from_t = analyze_speech(raw_t, duration, limit)
+    sp_model = SpeechMetrics.model_validate(sp_data)
+    # 가짜 파이프라인 예시 리포트처럼 대본은 일부만 있고 speech 지표가 따로 채워진 경우를 보정
+    speaking_sec = (
+        speech_from_t.speaking_sec
+        if speech_from_t.speaking_sec >= 10.0 or duration <= 10.0
+        else duration
+    )
+    span_sec = (
+        limit + over
+        if (limit is not None and over > 0)
+        else max(speech_from_t.speech_span_sec, duration)
+    )
+    ratio = round(span_sec / limit, 3) if limit else None
+    speech = SpeechAnalysis(
+        metrics=sp_model,
+        transcript=t,
+        syllable_count=speech_from_t.syllable_count,
+        speaking_sec=speaking_sec,
+        silences=speech_from_t.silences,
+        filler_hits=speech_from_t.filler_hits,
+        repeat_hits=speech_from_t.repeat_hits,
+        speech_span_sec=span_sec,
+        under_time_sec=max(0.0, (limit - span_sec) if limit else 0.0),
+        time_used_ratio=ratio,
+        is_under_time=bool(limit and span_sec < limit * 0.7),
+        profanity=speech_from_t.profanity,
+    )
+    nv = NonverbalAnalysis(
+        metrics=NonverbalMetrics.model_validate(nv_data),
+        frame_count=1,
+        face_frame_ratio=1.0,
+        posture_measured=nv_data.get("postureStability") is not None,
+        gesture_measured=nv_data.get("gesturePerMin") is not None,
+        gesture_times=[],
+        gaze_away_ranges=[],
+        posture_unstable_ranges=[],
+        gesture_none_ranges=[],
+        gesture_excess_ranges=[],
+    )
+    issues: list[ContentIssue] = []
+    for f in data.get("feedbacks", []):
+        if f.get("type") in ("STRUCTURE", "CLARITY"):
+            issues.append(
+                ContentIssue(
+                    type=IssueType(f["type"]),
+                    segment_ids=[],
+                    start=float(f["start"]),
+                    end=float(f["end"]),
+                    reason=str(f.get("description") or ""),
+                )
+            )
+    content = ContentAnalysis(
+        sections=[],
+        key_message=None,
+        issues=issues,
+        slide_coverage=None,
+        expected_questions=[],
+        usage=None,
+    )
+    return build_metric_details(speech, nv, content)
+
+
+def history_values(
+    data: dict[str, Any],
+    metric_details: dict[str, dict[str, float | None] | None] | None = None,
+) -> dict[str, Any]:
+    """P2·P3·P7 및 M1~M3 마이페이지가 쓰는 회차 요약값(Analysis 컬럼)."""
+    sp = data["metrics"]["speech"]
+    fb_counts = Counter(f["type"] for f in data.get("feedbacks", []))
+    overall_score = int(data["overall"]["score"])
+    grade = data["overall"].get("grade") or grade_for(overall_score)
     return {
-        "overall_score": data["overall"]["score"],
+        "overall_score": overall_score,
+        "grade": grade,
         "scores": {s["category"]: s["score"] for s in data["scores"]},
-        "filler_count": data["metrics"]["speech"]["fillerCount"],
-        "syllables_per_min": data["metrics"]["speech"]["syllablesPerMin"],
+        "metric_details": (
+            metric_details
+            if metric_details is not None
+            else _metric_details_from_report_json(data)
+        ),
+        "filler_counts": [
+            {"word": str(item["word"]), "count": int(item["count"])}
+            for item in sp.get("fillers", [])
+            if int(item.get("count", 0)) > 0
+        ],
+        "feedback_counts": dict(fb_counts),
+        "filler_count": sp["fillerCount"],
+        "syllables_per_min": sp["syllablesPerMin"],
     }

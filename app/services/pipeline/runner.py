@@ -31,6 +31,7 @@
 STALE_WORKDIR_SEC보다 오래된 임시 폴더를 지운다.
 """
 
+import contextlib
 import copy
 import hashlib
 import json
@@ -79,7 +80,7 @@ from app.services.pipeline.lifecycle import (
 from app.services.pipeline.llm import LlmClient
 from app.services.pipeline.nonverbal import NoFaceDetected, NonverbalUnavailable
 from app.services.pipeline.report import ReportInvalid, ReportParts, build_report, validate_report
-from app.services.pipeline.scoring import score_presentation
+from app.services.pipeline.scoring import build_metric_details, score_presentation
 from app.services.pipeline.speech_metrics import analyze_speech
 from app.services.pipeline.stt import NoSpeechDetected, SttClient, SttServiceError
 from app.services.storage import Storage, StorageError
@@ -295,14 +296,40 @@ def _execute(
     }
 
     same = _previous(db, p.user_id, aid, cache_key=cache_key) if cache_key else None
+    same_analysis = db.get(Analysis, same.analysis_id) if same is not None else None
+    same_metric_details = (
+        copy.deepcopy(same_analysis.metric_details)
+        if same_analysis is not None and same_analysis.metric_details is not None
+        else None
+    )
     same_art = db.get(AnalysisArtifact, same.analysis_id) if same is not None else None
     same_art_data = copy.deepcopy(same_art.data) if same_art is not None else None
+    if same_metric_details is None and same_art_data is not None:
+        from app.services.pipeline.artifacts import _rebuild_with_details
+
+        with contextlib.suppress(Exception):
+            _, _, same_metric_details = _rebuild_with_details(
+                same_art_data,
+                analysis_id=analysis.id,
+                presentation_id=analysis.presentation_id,
+                attempt_no=analysis.attempt_no,
+                created_at=analysis.created_at,
+            )
     db.commit()  # 읽기 트랜잭션을 길게 열어 두지 않는다
     reused = _try_rebase(same.data, analysis) if same is not None else None
     if reused is not None:
         logger.info("Analysis %s reuses a previous report (same video and settings)", aid)
         # 중간 결과도 함께 복사해 이 회차도 재계산할 수 있게 한다(원본 회차를 지워도 남는다).
-        complete(db, analysis, reused, duration, deps.now(), artifacts=same_art_data, **extra)
+        complete(
+            db,
+            analysis,
+            reused,
+            duration,
+            deps.now(),
+            artifacts=same_art_data,
+            metric_details=same_metric_details,
+            **extra,
+        )
         return
     set_progress(db, aid, AnalysisStage.EXTRACTING_AUDIO, 5)
 
@@ -400,7 +427,17 @@ def _execute(
         content=ct,
         feedback=fb,
     )
-    complete(db, analysis, report, duration, deps.now(), artifacts=_storable(artifacts), **extra)
+    metric_details = build_metric_details(speech, nv, ct, scores)
+    complete(
+        db,
+        analysis,
+        report,
+        duration,
+        deps.now(),
+        artifacts=_storable(artifacts),
+        metric_details=metric_details,
+        **extra,
+    )
 
 
 def _storable(artifacts: dict[str, Any]) -> dict[str, Any] | None:

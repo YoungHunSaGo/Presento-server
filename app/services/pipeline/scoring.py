@@ -247,6 +247,108 @@ def content_details(
     }
 
 
+def build_metric_details(
+    speech: SpeechAnalysis,
+    nonverbal: NonverbalAnalysis | None,
+    content: ContentAnalysis | None,
+    scores: ScoreResult | None = None,
+) -> dict[str, dict[str, float | None] | None]:
+    """마이페이지(M2) 집계용 세부 항목별 {score, value}(측정 불가는 None).
+
+    value 단위(docs/mypage-spec.md):
+    - PACE: 분당 음절(spm)
+    - FILLER / SILENCE / GESTURE: 분당 횟수(per_min)
+    - TIME: 제한 시간 대비 발표 시간 비율(0~1+, ratio)
+    - GAZE / POSTURE: 0~1 비율
+    - STRUCTURE / CLARITY / LANGUAGE: 회차당 지적/부적절 표현 건수
+    """
+    sc = scores or score_presentation(Purpose.ETC, speech, nonverbal, content)
+    d_det = sc.details[ScoreCategory.DELIVERY]
+    n_det = sc.details[ScoreCategory.NONVERBAL]
+    c_det = sc.details[ScoreCategory.CONTENT]
+
+    m = speech.metrics
+    minutes = speech.speaking_sec / 60 if speech.speaking_sec > 0 else 0.0
+    nv_m = nonverbal.metrics if nonverbal is not None else None
+    prof_count = speech.profanity.count
+
+    n_struct = (
+        sum(1 for i in content.issues if i.type is IssueType.STRUCTURE)
+        if content is not None
+        else None
+    )
+    n_clar = (
+        sum(1 for i in content.issues if i.type is IssueType.CLARITY)
+        if content is not None
+        else None
+    )
+    n_lang = (
+        prof_count + sum(1 for i in content.issues if i.type is IssueType.LANGUAGE)
+        if content is not None
+        else None
+    )
+
+    raw_items: list[tuple[str, float | None, float | None]] = [
+        (
+            "PACE",
+            d_det.get("pace"),
+            float(m.syllables_per_min) if d_det.get("pace") is not None else None,
+        ),
+        (
+            "FILLER",
+            d_det.get("filler"),
+            round(m.filler_count / minutes, 4) if minutes > 0 else None,
+        ),
+        (
+            "SILENCE",
+            d_det.get("silence"),
+            round(m.silence_count / minutes, 4) if minutes > 0 else None,
+        ),
+        (
+            "TIME",
+            d_det.get("time"),
+            speech.time_used_ratio if d_det.get("time") is not None else None,
+        ),
+        (
+            "GAZE",
+            n_det.get("gaze"),
+            nv_m.gaze_front_ratio if nv_m is not None else None,
+        ),
+        (
+            "POSTURE",
+            n_det.get("posture"),
+            nv_m.posture_stability if nv_m is not None else None,
+        ),
+        (
+            "GESTURE",
+            n_det.get("gesture"),
+            nv_m.gesture_per_min if nv_m is not None else None,
+        ),
+        (
+            "STRUCTURE",
+            c_det.get("structure"),
+            float(n_struct) if n_struct is not None else None,
+        ),
+        (
+            "CLARITY",
+            c_det.get("clarity"),
+            float(n_clar) if n_clar is not None else None,
+        ),
+        (
+            "LANGUAGE",
+            c_det.get("language"),
+            float(n_lang) if n_lang is not None else None,
+        ),
+    ]
+    out: dict[str, dict[str, float | None] | None] = {}
+    for key, score, val in raw_items:
+        if score is None or val is None or not (math.isfinite(score) and math.isfinite(val)):
+            out[key] = None
+        else:
+            out[key] = {"score": round(float(score), 2), "value": round(float(val), 4)}
+    return out
+
+
 def grade_for(score: int) -> str:
     for floor, grade in GRADES:
         if score >= floor:

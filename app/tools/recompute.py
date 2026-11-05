@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from app.core.config import get_settings
 from app.core.database import make_engine, make_session_factory
 from app.models import AnalysisArtifact
-from app.services.pipeline.artifacts import ArtifactMissing, recompute
+from app.services.pipeline.artifacts import ArtifactMissing, backfill_analysis_summary, recompute
 from app.services.pipeline.report import ReportInvalid
 
 
@@ -32,6 +32,11 @@ def main(argv: list[str] | None = None, session_factory=None) -> int:
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--all", action="store_true", help="중간 결과가 있는 모든 회차")
     mode.add_argument("--stats", action="store_true", help="저장 용량 통계만 보기")
+    mode.add_argument(
+        "--backfill",
+        action="store_true",
+        help="완료된 모든 회차의 마이페이지 요약 컬럼을 백필(실패한 회차는 건너뜀)",
+    )
     ap.add_argument("--dry-run", action="store_true", help="저장하지 않고 결과만 보기")
     ap.add_argument(
         "--allow-old-version",
@@ -40,12 +45,18 @@ def main(argv: list[str] | None = None, session_factory=None) -> int:
         " 새로 분석한 결과와 다를 수 있음)",
     )
     args = ap.parse_args(argv)
-    if (args.all or args.stats) and args.analysis_ids:
-        ap.error("회차 ID와 --all/--stats는 함께 쓸 수 없어요")
+    if (args.all or args.stats or args.backfill) and args.analysis_ids:
+        ap.error("회차 ID와 --all/--stats/--backfill은 함께 쓸 수 없어요")
     if session_factory is None:
         session_factory = make_session_factory(make_engine(get_settings().database_url))
 
     with session_factory() as db:
+        if args.backfill:
+            updated, skipped = backfill_analysis_summary(
+                db, dry_run=args.dry_run, allow_old_version=True
+            )
+            print(f"backfilled={updated} skipped={skipped}")
+            return 0
         if args.stats:
             n, total, avg, mx = db.execute(
                 select(

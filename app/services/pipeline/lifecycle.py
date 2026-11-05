@@ -119,9 +119,10 @@ def complete(
     duration: float,
     now: datetime,
     artifacts: dict[str, Any] | None = None,
+    metric_details: dict[str, dict[str, float | None] | None] | None = None,
     **extra: Any,
 ) -> None:
-    """리포트 저장 + 회차 요약값(P2·P3·P7) 갱신. extra는 Analysis 컬럼(해시 등).
+    """리포트 저장 + 회차 요약값(P2·P3·P7 및 마이페이지) 갱신. extra는 Analysis 컬럼(해시 등).
 
     artifacts(중간 결과)가 있으면 같은 트랜잭션에 함께 저장한다.
     """
@@ -134,7 +135,7 @@ def complete(
             progress=100,
             duration_sec=round(duration, 2),
             completed_at=now,
-            **history_values(report),
+            **history_values(report, metric_details=metric_details),
             **extra,
         )
     )

@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     UniqueConstraint,
@@ -28,7 +29,15 @@ class Analysis(Base):
     """발표 한 회차."""
 
     __tablename__ = "analyses"
-    __table_args__ = (UniqueConstraint("presentation_id", "attempt_no"),)
+    __table_args__ = (
+        UniqueConstraint("presentation_id", "attempt_no"),
+        Index(
+            "ix_analyses_presentation_id_status_completed_at",
+            "presentation_id",
+            "status",
+            "completed_at",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: new_id("a"))
     presentation_id: Mapped[str] = mapped_column(
@@ -48,9 +57,13 @@ class Analysis(Base):
     video_key: Mapped[str | None] = mapped_column(String(255))
     duration_sec: Mapped[float | None] = mapped_column(Float)
 
-    # 완료 시 채우는 점수 요약(P2·P3·P7용). 전체 리포트는 Report에 둔다.
+    # 완료 시 채우는 점수 요약(P2·P3·P7 및 M1~M3 마이페이지용). 전체 리포트는 Report에 둔다.
     overall_score: Mapped[int | None] = mapped_column(Integer)
+    grade: Mapped[str | None] = mapped_column(String(4))
     scores: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    metric_details: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    filler_counts: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+    feedback_counts: Mapped[dict[str, int] | None] = mapped_column(JSON)
     filler_count: Mapped[int | None] = mapped_column(Integer)
     syllables_per_min: Mapped[int | None] = mapped_column(Integer)
 

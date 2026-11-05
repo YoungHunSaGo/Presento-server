@@ -5,7 +5,7 @@
 > - 백엔드가 아직 없으므로 MSW(Mock Service Worker)로 4·5장의 예시 JSON을 그대로 응답하는 목업을 먼저 만든다.
 > - 명세가 모호하거나 빠진 부분이 있으면 임의로 정하지 말고 `TODO(spec):` 주석을 남기고 사람에게 묻는다.
 > - 권장 스택: React + TypeScript (Vite), React Router, axios, TanStack Query, MSW, Recharts.
-> - 변경 이력: 영상 보관 기간(기본 7일) 후 삭제, N5 410
+> - 변경 이력: 영상 보관 기간(기본 7일) 후 삭제, N5 410 / 마이페이지 M1–M3 추가
 
 ---
 
@@ -93,7 +93,7 @@ flowchart LR
 
 ## 3. API 목록
 
-API는 16개이고, 영상 분석의 핵심 흐름은 **"업로드 URL 발급 → S3 직접 업로드 → 분석 시작 → 상태 조회 → 리포트 조회"** 5단계다. "발표"는 하나의 주제이고, 그 발표를 여러 번 연습한 각 회차가 "분석"이다.
+API는 19개이고, 영상 분석의 핵심 흐름은 **"업로드 URL 발급 → S3 직접 업로드 → 분석 시작 → 상태 조회 → 리포트 조회"** 5단계다. "발표"는 하나의 주제이고, 그 발표를 여러 번 연습한 각 회차가 "분석"이다.
 
 | # | 분류 | Method | Path | 설명 | 인증 |
 | --- | --- | --- | --- | --- | --- |
@@ -113,6 +113,11 @@ API는 16개이고, 영상 분석의 핵심 흐름은 **"업로드 URL 발급 �
 | N4 | 분석 | GET | `/analyses/{analysisId}/report` | 피드백 리포트 조회 | O |
 | N5 | 분석 | GET | `/analyses/{analysisId}/video-url` | 영상 재생용 URL 발급 | O |
 | N6 | 분석 | DELETE | `/analyses/{analysisId}` | 회차 삭제 | O |
+| M1 | 마이페이지 | GET | `/users/me/stats` | 요약 통계, 카테고리 평균, 주간 활동, 목적별 기록 | O |
+| M2 | 마이페이지 | GET | `/users/me/insights` | 강점·약점, 항목별 점수, 추임새·피드백 순위 | O |
+| M3 | 마이페이지 | GET | `/users/me/score-timeline` | 발표 구분 없이 회차별 점수 추이 | O |
+
+마이페이지 API(M1–M3) 상세 명세는 [`docs/mypage-spec.md`](mypage-spec.md)를 참고한다.
 
 분석 진행 상태는 **N3을 2초마다 폴링**하는 방식으로 구현한다. 실시간 이벤트(SSE)는 기본 기능이 끝난 뒤 여유가 있으면 추가한다.
 

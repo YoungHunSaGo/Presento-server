@@ -197,12 +197,15 @@ def test_validation_rejects_off_spec(mutate):
 
 def test_history_values():
     data = rp.build_report(parts())
-    assert rp.history_values(data) == {
-        "overall_score": 82,
-        "scores": {"DELIVERY": 80, "NONVERBAL": 84, "CONTENT": 81},
-        "filler_count": 9,
-        "syllables_per_min": 341,
-    }
+    hv = rp.history_values(data)
+    assert hv["overall_score"] == 82
+    assert hv["grade"] == "B+"
+    assert hv["scores"] == {"DELIVERY": 80, "NONVERBAL": 84, "CONTENT": 81}
+    assert hv["filler_count"] == 9
+    assert hv["syllables_per_min"] == 341
+    assert hv["filler_counts"] == [{"word": "음", "count": 9}]
+    assert hv["feedback_counts"] == {"PACE_FAST": 1}
+    assert hv["metric_details"]["PACE"]["value"] == 341.0
 
 
 @pytest.mark.parametrize(

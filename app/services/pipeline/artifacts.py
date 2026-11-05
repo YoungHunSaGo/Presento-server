@@ -43,7 +43,7 @@ from app.services.pipeline import feedback as feedback_mod
 from app.services.pipeline.nonverbal import FrameObs, HeadTurn, PoseObs, analyze_nonverbal
 from app.services.pipeline.profanity_ko import ProfanityResult, detect_profanity, profanity_to_json
 from app.services.pipeline.report import ReportParts, build_report, history_values
-from app.services.pipeline.scoring import score_presentation
+from app.services.pipeline.scoring import build_metric_details, score_presentation
 from app.services.pipeline.speech_metrics import analyze_speech
 
 FORMAT_VERSION = 1
@@ -293,19 +293,14 @@ def _candidate_key(c: feedback_mod.Candidate) -> tuple:
     return (c.type.value, c.severity.value, c.start, c.end, json.dumps(c.values, sort_keys=True))
 
 
-def rebuild_report(
+def _rebuild_with_details(
     data: dict[str, Any],
     *,
     analysis_id: str,
     presentation_id: str,
     attempt_no: int,
     created_at: datetime,
-) -> tuple[dict[str, Any], bool]:
-    """중간 결과로 리포트를 다시 조립한다(LLM 없음). 제한 시간·목적은 저장된 값을 쓴다.
-
-    (리포트, drift). drift는 지금 코드로 만든 피드백 후보(구간·수치)가 저장된 후보와 달라
-    피드백 문장 속 숫자·구간이 새 지표와 어긋날 수 있다는 표시다(문장은 LLM 없이 바꿀 수 없음).
-    """
+) -> tuple[dict[str, Any], bool, dict[str, dict[str, float | None] | None]]:
     if data.get("formatVersion") != FORMAT_VERSION:
         raise ArtifactMissing(f"unsupported artifact format {data.get('formatVersion')!r}")
     inp = data["input"]
@@ -319,6 +314,7 @@ def rebuild_report(
     content = content_from_json(data["content"]["result"])
     fb = feedback_from_json(data["feedback"]["result"])
     scores = score_presentation(purpose, speech, nv, content)
+    metric_details = build_metric_details(speech, nv, content, scores)
     current = feedback_mod.build_candidates(
         feedback_mod.FeedbackInput(
             purpose=purpose,
@@ -345,6 +341,29 @@ def rebuild_report(
             content=content,
             feedback=fb,
         )
+    )
+    return report, drift, metric_details
+
+
+def rebuild_report(
+    data: dict[str, Any],
+    *,
+    analysis_id: str,
+    presentation_id: str,
+    attempt_no: int,
+    created_at: datetime,
+) -> tuple[dict[str, Any], bool]:
+    """중간 결과로 리포트를 다시 조립한다(LLM 없음). 제한 시간·목적은 저장된 값을 쓴다.
+
+    (리포트, drift). drift는 지금 코드로 만든 피드백 후보(구간·수치)가 저장된 후보와 달라
+    피드백 문장 속 숫자·구간이 새 지표와 어긋날 수 있다는 표시다(문장은 LLM 없이 바꿀 수 없음).
+    """
+    report, drift, _ = _rebuild_with_details(
+        data,
+        analysis_id=analysis_id,
+        presentation_id=presentation_id,
+        attempt_no=attempt_no,
+        created_at=created_at,
     )
     return report, drift
 
@@ -377,7 +396,7 @@ def recompute(
         )
     created = a.created_at if a.created_at.tzinfo else a.created_at.replace(tzinfo=UTC)
     # 제한 시간·목적은 처음 분석 때 값(저장값)을 쓴다(나중에 발표를 고쳐도 같은 결과가 나오게).
-    new, drift = rebuild_report(
+    new, drift, metric_details = _rebuild_with_details(
         art.data,
         analysis_id=a.id,
         presentation_id=a.presentation_id,
@@ -387,7 +406,50 @@ def recompute(
     old = rep.data
     if write:
         rep.data = new
-        for k, v in history_values(new).items():
+        for k, v in history_values(new, metric_details=metric_details).items():
             setattr(a, k, v)
         db.commit()
     return old, new, drift
+
+
+def backfill_analysis_summary(
+    db: Session, *, dry_run: bool = False, allow_old_version: bool = True
+) -> tuple[int, int]:
+    """완료된 회차들의 마이페이지 요약 컬럼(grade, metric_details, filler_counts, feedback_counts)을
+    저장된 아티팩트(없으면 리포트 JSON)로 채운다. LLM 호출 없음.
+
+    반환: (성공 개수, 건너뛴 개수). 한 회차가 실패해도 나머지는 계속 처리한다.
+    """
+    from sqlalchemy import select
+
+    from app.models.enums import AnalysisStatus
+
+    ids = list(
+        db.scalars(
+            select(Analysis.id)
+            .where(Analysis.status == AnalysisStatus.COMPLETED)
+            .order_by(Analysis.created_at.asc())
+        )
+    )
+    updated = skipped = 0
+    for aid in ids:
+        try:
+            a = db.get(Analysis, aid)
+            rep = db.get(Report, aid)
+            if a is None or rep is None:
+                skipped += 1
+                continue
+            art = db.get(AnalysisArtifact, aid)
+            if art is not None:
+                recompute(db, aid, write=not dry_run, allow_old_version=allow_old_version)
+            else:
+                vals = history_values(rep.data)
+                if not dry_run:
+                    for k, v in vals.items():
+                        setattr(a, k, v)
+                    db.commit()
+            updated += 1
+        except Exception:  # noqa: BLE001 - 한 회차가 실패해도 나머지는 계속 백필
+            db.rollback()
+            skipped += 1
+    return updated, skipped
