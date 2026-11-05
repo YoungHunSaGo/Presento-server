@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     max_video_bytes: int = 2_147_483_648
     max_slides_bytes: int = 20 * 1024 * 1024
     daily_analysis_limit: int = 20
+    # 원본 영상(videos/) 보관 기간(일). 버킷 수명 주기 규칙으로 자동 삭제하며 N5 410 안내에 쓴다.
+    video_retention_days: int = Field(default=7, ge=1)
 
     # presigned URL 만료(초): 명세 P6 600, N1 900, N5 3600
     slides_upload_url_expires_sec: int = 600
@@ -86,6 +88,13 @@ class Settings(BaseSettings):
     def _blank_url_is_none(cls, v: object) -> object:
         # .env의 "S3_PUBLIC_ENDPOINT_URL=" 같은 빈 값은 "설정 안 함"으로 본다.
         return None if isinstance(v, str) and not v.strip() else v
+
+    @field_validator("video_retention_days", mode="before")
+    @classmethod
+    def _retention_days_not_bool(cls, v: object) -> object:
+        if isinstance(v, bool):
+            raise ValueError("VIDEO_RETENTION_DAYS must be an integer")
+        return v
 
     @field_validator("openai_api_key")
     @classmethod

@@ -18,6 +18,7 @@ x-app: &app
   environment:
     DATABASE_URL: postgresql+psycopg://presento:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 .env.prod에 넣어 주세요}@postgres:5432/presento
     REDIS_URL: redis://redis:6379/0
+    VIDEO_RETENTION_DAYS: ${VIDEO_RETENTION_DAYS:-7}
     # EC2 역할 자격 증명(IMDS) 조회가 시작 직후 느려도 넉넉히 기다린다.
     AWS_METADATA_SERVICE_TIMEOUT: "2"
     AWS_METADATA_SERVICE_NUM_ATTEMPTS: "3"

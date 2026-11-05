@@ -5,6 +5,7 @@
 > - 백엔드가 아직 없으므로 MSW(Mock Service Worker)로 4·5장의 예시 JSON을 그대로 응답하는 목업을 먼저 만든다.
 > - 명세가 모호하거나 빠진 부분이 있으면 임의로 정하지 말고 `TODO(spec):` 주석을 남기고 사람에게 묻는다.
 > - 권장 스택: React + TypeScript (Vite), React Router, axios, TanStack Query, MSW, Recharts.
+> - 변경 이력: 영상 보관 기간(기본 7일) 후 삭제, N5 410
 
 ---
 
@@ -299,7 +300,7 @@ await axios.put(upload.uploadUrl, file, {
 
 ### N5. 영상 재생 URL `GET /analyses/{analysisId}/video-url`
 
-응답 `200` `{ "videoUrl": "https://presento-bucket.s3.amazonaws.com/...", "expiresInSec": 3600 }` — `<video src>`에 넣는다. 1시간 뒤 만료되므로 리포트 화면에 들어올 때마다 새로 받는다.
+응답 `200` `{ "videoUrl": "https://presento-bucket.s3.amazonaws.com/...", "expiresInSec": 3600 }` — `<video src>`에 넣는다. 1시간 뒤 만료되므로 리포트 화면에 들어올 때마다 새로 받는다. 보관 기간(기본 7일)이 지나 원본 영상이 삭제됐으면 `410 VIDEO_EXPIRED`(리포트 조회는 그대로 가능).
 
 ### N6. 회차 삭제 `DELETE /analyses/{analysisId}`
 
@@ -490,6 +491,7 @@ await axios.put(upload.uploadUrl, file, {
 | 409 | `EMAIL_ALREADY_EXISTS` | 이미 가입된 이메일 |
 | 409 | `UPLOAD_NOT_FOUND` | 업로드 전에 분석 시작 호출 |
 | 409 | `ANALYSIS_NOT_READY` | 분석 완료 전 리포트 요청 |
+| 410 | `VIDEO_EXPIRED` | 보관 기간(기본 7일)이 지나 원본 영상이 삭제됨(리포트는 그대로 조회 가능) |
 | 413 | `FILE_TOO_LARGE` | 영상 2GB, PDF 20MB 초과 |
 | 415 | `UNSUPPORTED_FILE_TYPE` | mp4·mov·webm·pdf 외 형식 |
 | 422 | `VIDEO_TOO_LONG` | 10분 초과 영상 |

@@ -76,6 +76,13 @@ if [[ ! "$s3_bucket" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]; then
   exit 1
 fi
 
+retention_days="$(env_val VIDEO_RETENTION_DAYS)"
+retention_days="${retention_days:-7}"
+if [[ ! "$retention_days" =~ ^[1-9][0-9]*$ ]]; then
+  echo "${ENV_FILE}의 VIDEO_RETENTION_DAYS는 1 이상의 정수여야 해요." >&2
+  exit 1
+fi
+
 dc() { docker compose -f docker-compose.home.yml --env-file "$ENV_FILE" "$@"; }
 
 if [[ "${1:-}" != "--no-pull" ]]; then

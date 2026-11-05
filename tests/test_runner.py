@@ -361,6 +361,31 @@ def test_same_video_different_purpose_reuses_only_transcript(world):
     assert "analyze_content" in world.steps.calls and "generate_feedback" in world.steps.calls
 
 
+def test_reuse_works_after_previous_video_object_expired(world, db):
+    first = world.make(video=b"same", purpose="CLASS")
+    assert world.run(first) == "completed"
+    first_key = _analysis(db, first).video_key
+    # 첫 회차의 원본 영상이 보관 기간 만료로 스토리지에서 삭제됨
+    world.storage.objects.pop(first_key, None)
+    world.storage.files.pop(first_key, None)
+
+    # 1) 같은 설정이면 전체 리포트·아티팩트 재사용(첫 회차 S3 영상 불필요)
+    world.steps.calls.clear()
+    second = world.make(video=b"same", purpose="CLASS", attempt=2)
+    assert world.run(second) == "completed"
+    assert world.steps.calls == []
+    assert _analysis(db, second).overall_score == _analysis(db, first).overall_score
+
+    # 2) 다른 목적이면 대본 재사용(첫 회차 S3 영상 불필요)
+    world.storage.objects.pop(_analysis(db, second).video_key, None)
+    world.storage.files.pop(_analysis(db, second).video_key, None)
+    world.steps.calls.clear()
+    third = world.make(video=b"same", purpose="PITCH", attempt=3)
+    assert world.run(third) == "completed"
+    assert "transcribe" not in world.steps.calls
+    assert "analyze_content" in world.steps.calls
+
+
 def test_different_video_runs_fully(world):
     world.run(world.make(video=b"A"))
     world.steps.calls.clear()

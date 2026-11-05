@@ -143,3 +143,14 @@ def test_update_script_checks_s3_and_reexecs_after_pull():
 
 def test_setup_waits_for_dpkg_lock():
     assert "DPkg::Lock::Timeout" in (DEPLOY / "setup.sh").read_text()
+
+
+def test_s3_lifecycle_expires_only_videos_prefix(prod):
+    (rule,) = json.loads((DEPLOY / "s3-lifecycle.json").read_text())["Rules"]
+    assert rule["Status"] == "Enabled"
+    assert rule["Filter"] == {"Prefix": "videos/"}
+    assert rule["Expiration"] == {"Days": 7}
+    for name in ("api", "worker"):
+        assert prod["services"][name]["environment"]["VIDEO_RETENTION_DAYS"] == (
+            "${VIDEO_RETENTION_DAYS:-7}"
+        )

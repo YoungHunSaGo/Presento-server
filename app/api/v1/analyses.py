@@ -342,7 +342,7 @@ def get_report(
 @router.get(
     "/analyses/{analysis_id}/video-url",
     response_model=VideoUrlResponse,
-    responses=_docs((409, "UPLOAD_NOT_FOUND")),
+    responses=_docs((409, "UPLOAD_NOT_FOUND"), (410, "VIDEO_EXPIRED")),
 )
 def get_video_url(
     a: Analysis = Depends(get_owned_analysis),
@@ -351,6 +351,18 @@ def get_video_url(
 ) -> VideoUrlResponse:
     if a.status == AnalysisStatus.WAITING_UPLOAD or not a.video_key:
         raise AppError("UPLOAD_NOT_FOUND", "아직 업로드된 영상이 없어요.", 409)
+    try:
+        size = storage.head(a.video_key)
+    except StorageError:
+        logger.warning("Video HEAD failed for %s", a.id, exc_info=True)
+        raise _storage_error() from None
+    if size is None:
+        raise AppError(
+            "VIDEO_EXPIRED",
+            f"보관 기간({settings.video_retention_days}일)이 지나 영상이 삭제됐어요. "
+            "리포트는 그대로 볼 수 있어요.",
+            410,
+        )
     expires = settings.video_play_url_expires_sec
     return VideoUrlResponse(
         video_url=storage.presign_get(a.video_key, expires), expires_in_sec=expires

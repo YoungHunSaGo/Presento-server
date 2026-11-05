@@ -32,6 +32,7 @@ x-app: &app
     S3_ACCESS_KEY: ${MINIO_APP_USER:?MINIO_APP_USER를 .env.home에 넣어 주세요}
     S3_SECRET_KEY: ${MINIO_APP_PASSWORD:?MINIO_APP_PASSWORD를 .env.home에 넣어 주세요}
     S3_BUCKET: ${S3_BUCKET:-presento}
+    VIDEO_RETENTION_DAYS: ${VIDEO_RETENTION_DAYS:-7}
   restart: unless-stopped
   logging: *logging
 
@@ -157,6 +158,9 @@ services:
       APP_USER: ${MINIO_APP_USER:?MINIO_APP_USER를 .env.home에 넣어 주세요}
       APP_PASSWORD: ${MINIO_APP_PASSWORD:?MINIO_APP_PASSWORD를 .env.home에 넣어 주세요}
       S3_BUCKET: ${S3_BUCKET:-presento}
+      # 원본 영상(videos/)만 이 일수 뒤 자동 삭제한다(slides/ 등 다른 접두사는 유지).
+      # 최대 10분 영상(워커 제한 16분)이고 보관 기간은 최소 1일 이상이라 분석 중인 영상이 만료될 일은 없다.
+      VIDEO_RETENTION_DAYS: ${VIDEO_RETENTION_DAYS:-7}
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
@@ -166,7 +170,19 @@ services:
             exit 1
             ;;
         esac
+        case "$$VIDEO_RETENTION_DAYS" in
+          ""|0*|*[!0-9]*)
+            echo "invalid VIDEO_RETENTION_DAYS: $$VIDEO_RETENTION_DAYS" >&2
+            exit 1
+            ;;
+        esac
         mc mb --ignore-existing "local/$$S3_BUCKET"
+        cat > /tmp/presento-ilm.json <<ILM
+        {"Rules": [{"ID": "expire-videos", "Status": "Enabled",
+          "Filter": {"Prefix": "videos/"},
+          "Expiration": {"Days": $$VIDEO_RETENTION_DAYS}}]}
+        ILM
+        mc ilm rule import "local/$$S3_BUCKET" < /tmp/presento-ilm.json >/dev/null
         cat > /tmp/presento-app.json <<POLICY
         {"Version": "2012-10-17", "Statement": [
           {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],

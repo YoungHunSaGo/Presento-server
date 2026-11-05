@@ -92,3 +92,16 @@ def test_validation_errors_do_not_show_secret_values():
     text = str(exc_info.value)
     for secret in ("sk-very-secret", "short-jwt-secret", "AKIAONLYKEY"):
         assert secret not in text
+
+
+def test_video_retention_days_default_and_validation():
+    s = Settings(_env_file=None, **_VALID)
+    assert s.video_retention_days == 7
+    assert Settings(_env_file=None, **_VALID, video_retention_days=1).video_retention_days == 1
+    assert Settings(_env_file=None, **_VALID, video_retention_days="14").video_retention_days == 14
+
+
+@pytest.mark.parametrize("bad", [0, -1, -7, "0", "-3", "abc", "7.5", 1.5, True, False, None])
+def test_video_retention_days_rejects_non_positive_or_non_int(bad):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **_VALID, video_retention_days=bad)

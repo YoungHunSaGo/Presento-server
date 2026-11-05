@@ -68,6 +68,7 @@ HTTPS는 Caddy(Let's Encrypt 자동 발급), 도메인은 sslip.io를 쓴다. �
 | `deploy/update.sh` | git pull → 빌드 → DB 마이그레이션 → 재시작 → 상태 확인 |
 | `deploy/iam-policy.json` | EC2 역할용 S3 정책(버킷 한정 Get/Put/Delete/List) |
 | `deploy/s3-cors.json` | S3 버킷 CORS(프론트 주소에서 PUT/GET) |
+| `deploy/s3-lifecycle.json` | S3 버킷 수명 주기 규칙(`videos/` 원본 영상 기본 7일 뒤 자동 삭제) |
 | `.env.prod.example` | 운영 설정 예시(비밀값은 비어 있음) |
 
 ### 1. AWS 콘솔에서 (한 번)
@@ -77,6 +78,9 @@ HTTPS는 Caddy(Let's Encrypt 자동 발급), 도메인은 sslip.io를 쓴다. �
    둔다(presigned URL로만 접근).
    - 권한 → CORS에 `deploy/s3-cors.json`의 `CORSRules` 배열 내용을 붙여 넣는다.
      `https://YOUR_FRONTEND_DOMAIN`은 프론트 배포 주소로 바꾸고, 아직 없으면 그 줄을 지운다.
+   - 관리 → 수명 주기 규칙(또는 AWS CLI:
+     `aws s3api put-bucket-lifecycle-configuration --bucket YOUR_BUCKET_NAME --lifecycle-configuration file://deploy/s3-lifecycle.json`)으로
+     `videos/` 접두사 객체가 `VIDEO_RETENTION_DAYS`(기본 7일) 뒤에 자동 만료되게 설정한다(`slides/`와 DB 리포트는 유지).
 2. **IAM 역할**: 신뢰 대상 EC2로 역할을 만들고, `deploy/iam-policy.json`의 `YOUR_BUCKET_NAME`을 버킷
    이름으로 바꿔 인라인 정책으로 붙인다.
    - `HeadObject`(업로드 확인)는 `s3:GetObject` 권한으로 허용된다. `s3:ListBucket`이 있어야 없는
@@ -153,6 +157,7 @@ AWS 대신 집 서버(RTX 3090, 같은 서버에서 HowMuch·Anima도 돎)에 �
 - MinIO CORS는 `CORS_ORIGINS`와 같은 값으로 자동 설정된다(허용한 주소에서 업로드 PUT·재생 GET 가능,
   `ETag` 헤더 노출). MinIO는 쉼표 뒤 공백을 지우지 않으므로 `a,b`처럼 붙여 쓴다.
 - 앱은 MinIO 관리자 계정이 아니라 `minio-init`이 만든 전용 계정(`MINIO_APP_USER`, 이 버킷만 읽기·쓰기·삭제)을 쓴다.
+- `minio-init`은 `videos/` 접두사 객체만 `VIDEO_RETENTION_DAYS`(기본 7일) 뒤에 자동 삭제하는 버킷 수명 주기 규칙(`mc ilm`)도 함께 설정한다(`slides/`와 DB 리포트·중간 결과는 남는다).
 
 ### 첫 설치
 

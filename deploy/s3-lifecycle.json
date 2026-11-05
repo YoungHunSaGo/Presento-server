@@ -1,0 +1,14 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-videos",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "videos/"
+      },
+      "Expiration": {
+        "Days": 7
+      }
+    }
+  ]
+}

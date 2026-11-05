@@ -201,6 +201,22 @@ def test_bucket_default_matches_settings(home):
     assert home["services"]["api"]["environment"]["S3_BUCKET"] == f"${{S3_BUCKET:-{default}}}"
 
 
+def test_video_retention_ilm_rule_in_minio_init(home, env_example):
+    from app.core.config import Settings
+
+    default_days = Settings.model_fields["video_retention_days"].default
+    assert env_example["VIDEO_RETENTION_DAYS"] == str(default_days)
+    for name in ("api", "worker", "minio-init"):
+        env = home["services"][name]["environment"]
+        assert env["VIDEO_RETENTION_DAYS"] == f"${{VIDEO_RETENTION_DAYS:-{default_days}}}"
+    script = home["services"]["minio-init"]["command"][0]
+    assert "invalid VIDEO_RETENTION_DAYS" in script
+    assert '"Prefix": "videos/"' in script
+    assert '"Days": $$VIDEO_RETENTION_DAYS' in script
+    assert 'mc ilm rule import "local/$$S3_BUCKET"' in script
+    assert "slides/" not in script  # slides/는 만료 대상이 아니다
+
+
 def test_home_update_checks_worker_and_scopes_cleanup():
     text = SCRIPT.read_text()
     assert "inspect ping" in text  # 워커가 살아 있는지
@@ -279,6 +295,9 @@ def test_home_update_rejects_wildcard_bind_addr(tmp_path, bad_bind):
         ({"POSTGRES_PASSWORD": "bad/password@url"}, "POSTGRES_PASSWORD에는 영문·숫자만"),
         ({"MINIO_ROOT_PASSWORD": "bad:password"}, "MINIO_ROOT_PASSWORD에는 영문·숫자만"),
         ({"S3_BUCKET": 'bad"bucket'}, "S3_BUCKET 형식이 올바르지 않아요"),
+        ({"VIDEO_RETENTION_DAYS": "0"}, "VIDEO_RETENTION_DAYS는 1 이상의 정수"),
+        ({"VIDEO_RETENTION_DAYS": "-5"}, "VIDEO_RETENTION_DAYS는 1 이상의 정수"),
+        ({"VIDEO_RETENTION_DAYS": "abc"}, "VIDEO_RETENTION_DAYS는 1 이상의 정수"),
     ],
 )
 def test_home_update_validates_env_values(tmp_path, overrides, expected_msg):

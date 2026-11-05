@@ -398,11 +398,71 @@ def test_full_flow_n1_to_n5(client, app, uploaded, auth_headers, storage, settin
 # ---------- N5 ----------
 
 
-def test_n5_before_upload(client, new_analysis, auth_headers):
+def test_n5_before_upload(client, new_analysis, auth_headers, storage):
     aid = new_analysis()["analysisId"]
+    storage.head_calls.clear()
     res = client.get(f"{API}/analyses/{aid}/video-url", headers=auth_headers)
     assert res.status_code == 409
     assert _err(res) == "UPLOAD_NOT_FOUND"
+    assert storage.head_calls == []
+
+
+def test_n5_expired_video_returns_410_and_report_remains_available(
+    client, app, uploaded, auth_headers, storage, settings
+):
+    settings.video_retention_days = 14
+    aid = uploaded()
+    assert client.post(f"{API}/analyses/{aid}/start", headers=auth_headers).status_code == 202
+    assert _run_worker(app, storage, settings, aid) == "completed"
+
+    # 보관 기간이 지나 버킷 수명 주기 규칙으로 원본 영상이 지워진 상황
+    storage.objects.pop(f"videos/{aid}", None)
+    storage.head_calls.clear()
+    storage.presigned.clear()
+
+    res = client.get(f"{API}/analyses/{aid}/video-url", headers=auth_headers)
+    assert res.status_code == 410
+    assert _err(res) == "VIDEO_EXPIRED"
+    assert (
+        res.json()["error"]["message"]
+        == "보관 기간(14일)이 지나 영상이 삭제됐어요. 리포트는 그대로 볼 수 있어요."
+    )
+    assert storage.head_calls == [f"videos/{aid}"]
+    assert storage.presigned == []
+
+    # 리포트(N4)는 영상이 지워져도 그대로 조회된다
+    report = client.get(f"{API}/analyses/{aid}/report", headers=auth_headers)
+    assert report.status_code == 200
+    assert report.json()["analysisId"] == aid
+
+
+def test_n5_forbidden_checked_before_storage_head(
+    client, app, uploaded, auth_headers, other_headers, storage, settings
+):
+    aid = uploaded()
+    client.post(f"{API}/analyses/{aid}/start", headers=auth_headers)
+    _run_worker(app, storage, settings, aid)
+    # 영상이 만료되어 없더라도 다른 사용자의 요청은 storage.head 호출 전에 403으로 막는다
+    storage.objects.pop(f"videos/{aid}", None)
+    storage.head_calls.clear()
+
+    res = client.get(f"{API}/analyses/{aid}/video-url", headers=other_headers)
+    assert res.status_code == 403
+    assert _err(res) == "FORBIDDEN"
+    assert storage.head_calls == []
+
+
+def test_n5_storage_error_returns_500(
+    client, app, uploaded, auth_headers, storage, settings
+):
+    aid = uploaded()
+    client.post(f"{API}/analyses/{aid}/start", headers=auth_headers)
+    _run_worker(app, storage, settings, aid)
+    storage.fail_head = True
+
+    res = client.get(f"{API}/analyses/{aid}/video-url", headers=auth_headers)
+    assert res.status_code == 500
+    assert _err(res) == "INTERNAL_ERROR"
 
 
 # ---------- N6 ----------

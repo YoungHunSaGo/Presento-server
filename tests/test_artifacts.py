@@ -110,8 +110,15 @@ def test_reused_analysis_copies_artifacts(world, db):  # noqa: F811
 def test_recompute_reproduces_stored_report(world, db):  # noqa: F811
     aid = world.make(limit=60)
     world.run(aid)
+    # 원본 영상이 보관 기간 만료로 스토리지에서 삭제된 뒤에도 recompute는 DB 아티팩트만으로 동작한다
+    key = _analysis(db, aid).video_key
+    world.storage.objects.pop(key, None)
+    world.storage.files.pop(key, None)
+    world.storage.downloads.clear()
+    world.storage.head_calls.clear()
     old, new, drift = art.recompute(db, aid, write=False)
     assert new == old and drift is False
+    assert world.storage.downloads == [] and world.storage.head_calls == []
     validate_report(new)
 
 
