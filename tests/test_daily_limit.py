@@ -102,12 +102,14 @@ def test_repeated_n2_consumes_once(
 
 @pytest.mark.parametrize("failure", ["upload_missing", "too_long", "too_large"])
 def test_rejected_n2_does_not_consume(
-    client, make_presentation, n1, auth_headers, storage, probe, db, failure
+    client, make_presentation, n1, auth_headers, storage, probe, db, settings, failure
 ):
     pid = make_presentation(auth_headers)
     aid = n1(pid, auth_headers).json()["analysisId"]
     if failure != "upload_missing":
-        storage.objects[f"videos/{aid}"] = 600 * 1024 * 1024 if failure == "too_large" else 1000
+        storage.objects[f"videos/{aid}"] = (
+            settings.max_video_bytes + 1 if failure == "too_large" else 1000
+        )
     if failure == "too_long":
         probe.duration = 700.0
     res = client.post(f"{API}/analyses/{aid}/start", headers=auth_headers)
