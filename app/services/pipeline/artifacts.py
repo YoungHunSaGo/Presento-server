@@ -191,7 +191,7 @@ def content_from_json(d: dict[str, Any]) -> content_mod.ContentAnalysis:
         dropped_items=d.get("droppedItems", 0),
         slides_missing_pages=list(d.get("slidesMissingPages", [])),
         slides_truncated=d.get("slidesTruncated", False),
-        prompt_version=d.get("promptVersion", content_mod.PROMPT_NAME),
+        prompt_version=d.get("promptVersion", "content_system_v2"),
     )
 
 
@@ -368,7 +368,9 @@ def recompute(
     if art is None or rep is None:
         raise ArtifactMissing(f"analysis {analysis_id} has no stored intermediate results")
     stored = (art.data.get("input") or {}).get("pipelineVersion")
-    if stored != PIPELINE_VERSION and not allow_old_version:
+    # 버전 4와 5는 프레임 추출·대본 형식이 같고 욕설 사전·content 프롬프트(v3)만 추가되었으므로
+    # 버전 4 아티팩트도 재계산을 허용한다(버전 3 이하는 프레임 추출 방식이 달라 거부).
+    if stored not in {PIPELINE_VERSION, "4"} and not allow_old_version:
         raise ArtifactMissing(
             f"pipeline version {stored!r} != current {PIPELINE_VERSION!r}"
             " (re-analyze, or use --allow-old-version)"

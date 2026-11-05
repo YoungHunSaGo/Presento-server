@@ -87,8 +87,9 @@ from app.services.storage import Storage, StorageError
 logger = logging.getLogger(__name__)
 
 # 알고리즘·프롬프트·기준값을 바꾸면 올린다. 바뀐 버전의 결과는 재사용하지 않는다.
-# 2: 얼굴 머리 영역 자르기, 3: stt 프롬프트 v2, 4: 실제 프레임 시각·2fps·제스처 안정화
-PIPELINE_VERSION = "4"
+# 2: 얼굴 머리 영역 자르기, 3: stt 프롬프트 v2, 4: 실제 프레임 시각·2fps·제스처 안정화,
+# 5: 욕설·비속어 사전 및 content 프롬프트 v3(LANGUAGE)
+PIPELINE_VERSION = "5"
 FRAME_FPS = 2.0  # 비언어(자세·제스처·시선) 프레임. 1fps와 처리 시간이 거의 같다(디코딩이 대부분)
 _HASH_CHUNK = 1024 * 1024
 WORKDIR_PREFIX = "presento-"

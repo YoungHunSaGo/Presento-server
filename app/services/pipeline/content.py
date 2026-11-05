@@ -52,6 +52,7 @@ from app.schemas.report import ExpectedQuestion, SlideCoverage, Transcript
 from app.services.pipeline import llm
 from app.services.pipeline.korean_style import to_haeyo
 from app.services.pipeline.llm import LlmClient
+from app.services.pipeline.profanity_ko import contains_profanity
 
 logger = logging.getLogger(__name__)
 
@@ -506,6 +507,12 @@ def _issues(raw: list[_Issue], post: _Post) -> list[ContentIssue]:
             continue
         start, end = post.times(ids)
         itype = IssueType(item.type)
+        if contains_profanity(reason):
+            if itype is IssueType.LANGUAGE:
+                reason = "발표 자리에 맞지 않는 부적절한 표현이 있어요."
+            else:
+                post.dropped += 1
+                continue
         sev: LanguageSeverity | None = None
         if itype is IssueType.LANGUAGE:
             sev = LanguageSeverity(item.severity) if item.severity else LanguageSeverity.MINOR

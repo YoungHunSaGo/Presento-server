@@ -623,16 +623,15 @@ def _max_severity(*sevs: Severity | None) -> Severity:
 
 
 def _merge(cands: list[Candidate], order: dict[str, int]) -> list[Candidate]:
-    by_type: dict[FeedbackType, list[Candidate]] = {}
+    by_group: dict[tuple[FeedbackType, bool], list[Candidate]] = {}
     for c in cands:
-        by_type.setdefault(c.type, []).append(c)
+        by_group.setdefault((c.type, c.priority > 0), []).append(c)
     out: list[Candidate] = []
-    for ftype, items in by_type.items():
+    for (ftype, _), items in by_group.items():
         items.sort(key=lambda c: c.start)
         cur = items[0]
         for nxt in items[1:]:
-            same_group = (cur.priority > 0) == (nxt.priority > 0)
-            if same_group and nxt.start - cur.end <= MERGE_GAP_SEC:
+            if nxt.start - cur.end <= MERGE_GAP_SEC:
                 start, end = cur.start, max(cur.end, nxt.end)
                 values = _merge_values(ftype, cur.values, nxt.values, start, end)
                 ids = sorted(
@@ -983,6 +982,7 @@ def _check(
             dropped += 1  # 없는 문장 ID: 그 항목만 버림
             continue
         allowed = set(_numbers(seg.text))
+        has_prof = contains_profanity(text) or contains_profanity(reason)
         if (
             not text
             or text == seg.text.strip()
@@ -992,12 +992,11 @@ def _check(
             or not reason
             or _DIGIT.search(reason)
             or "{" in reason
-            or contains_profanity(text)
-            or contains_profanity(reason)
+            or has_prof
         ):
             dropped += 1
             violations += 1
-            problems.add("script")
+            problems.add("profanity" if has_prof else "script")
             continue
         seen.add(s.segmentId)
         improved.append(
