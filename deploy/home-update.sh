@@ -76,6 +76,12 @@ if [[ ! "$s3_bucket" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]; then
   exit 1
 fi
 
+public_s3="$(env_val S3_PUBLIC_ENDPOINT_URL)"
+if [[ ! "$public_s3" =~ ^https?://[A-Za-z0-9._-]+(:[0-9]+)?(/.*)?$ ]]; then
+  echo "${ENV_FILE}의 S3_PUBLIC_ENDPOINT_URL 형식이 올바르지 않아요('<이름>' 같은 예시 대신 실제 주소를 넣어 주세요: ${public_s3})." >&2
+  exit 1
+fi
+
 retention_days="$(env_val VIDEO_RETENTION_DAYS)"
 retention_days="${retention_days:-7}"
 if [[ ! "$retention_days" =~ ^[1-9][0-9]*$ ]]; then

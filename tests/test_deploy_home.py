@@ -295,6 +295,14 @@ def test_home_update_rejects_wildcard_bind_addr(tmp_path, bad_bind):
         ({"POSTGRES_PASSWORD": "bad/password@url"}, "POSTGRES_PASSWORD에는 영문·숫자만"),
         ({"MINIO_ROOT_PASSWORD": "bad:password"}, "MINIO_ROOT_PASSWORD에는 영문·숫자만"),
         ({"S3_BUCKET": 'bad"bucket'}, "S3_BUCKET 형식이 올바르지 않아요"),
+        (
+            {"S3_PUBLIC_ENDPOINT_URL": "https://<이름>.ts.net:8443"},
+            "S3_PUBLIC_ENDPOINT_URL 형식이 올바르지 않아요",
+        ),
+        (
+            {"S3_PUBLIC_ENDPOINT_URL": "not-a-url"},
+            "S3_PUBLIC_ENDPOINT_URL 형식이 올바르지 않아요",
+        ),
         ({"VIDEO_RETENTION_DAYS": "0"}, "VIDEO_RETENTION_DAYS는 1 이상의 정수"),
         ({"VIDEO_RETENTION_DAYS": "-5"}, "VIDEO_RETENTION_DAYS는 1 이상의 정수"),
         ({"VIDEO_RETENTION_DAYS": "abc"}, "VIDEO_RETENTION_DAYS는 1 이상의 정수"),
