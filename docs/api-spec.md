@@ -42,7 +42,7 @@
 {
   "error": {
     "code": "FILE_TOO_LARGE",
-    "message": "영상은 500MB 이하만 업로드할 수 있어요.",
+    "message": "영상은 2GB 이하만 업로드할 수 있어요.",
     "details": null
   }
 }
@@ -236,7 +236,7 @@ API는 16개이고, 영상 분석의 핵심 흐름은 **"업로드 URL 발급 �
 ```
 
 - `contentType`: `video/mp4`, `video/quicktime`(mov), `video/webm` 중 하나. 웹 녹화는 크롬이 webm, 사파리가 mp4로 나온다.
-- `fileSize`: 바이트. 500MB 이하. `source`: `UPLOAD` 또는 `RECORDING`.
+- `fileSize`: 바이트. 2GB 이하. `source`: `UPLOAD` 또는 `RECORDING`.
 - 하루 분석 횟수가 이미 찼으면 `429 RATE_LIMITED`.
 
 응답 `201`
@@ -490,7 +490,7 @@ await axios.put(upload.uploadUrl, file, {
 | 409 | `EMAIL_ALREADY_EXISTS` | 이미 가입된 이메일 |
 | 409 | `UPLOAD_NOT_FOUND` | 업로드 전에 분석 시작 호출 |
 | 409 | `ANALYSIS_NOT_READY` | 분석 완료 전 리포트 요청 |
-| 413 | `FILE_TOO_LARGE` | 영상 500MB, PDF 20MB 초과 |
+| 413 | `FILE_TOO_LARGE` | 영상 2GB, PDF 20MB 초과 |
 | 415 | `UNSUPPORTED_FILE_TYPE` | mp4·mov·webm·pdf 외 형식 |
 | 422 | `VIDEO_TOO_LONG` | 10분 초과 영상 |
 | 429 | `RATE_LIMITED` | 하루 분석 횟수(사용자당 20회) 초과 |

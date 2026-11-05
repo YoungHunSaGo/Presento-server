@@ -14,7 +14,7 @@ VIDEO = {
     "fileSize": 84213760,
     "source": "RECORDING",
 }
-MB500 = 500 * 1024 * 1024
+GB2 = 2 * 1024 * 1024 * 1024
 
 
 def _err(res) -> str:
@@ -173,15 +173,15 @@ def test_n1_rejects_other_types(client, presentation, auth_headers, content_type
 
 
 def test_n1_file_size_limit(client, presentation, auth_headers, new_analysis):
-    assert new_analysis(fileSize=MB500)["status"] == "WAITING_UPLOAD"
+    assert new_analysis(fileSize=GB2)["status"] == "WAITING_UPLOAD"
     res = client.post(
         f"{API}/presentations/{presentation}/analyses",
-        json={**VIDEO, "fileSize": MB500 + 1},
+        json={**VIDEO, "fileSize": GB2 + 1},
         headers=auth_headers,
     )
     assert res.status_code == 413
     assert _err(res) == "FILE_TOO_LARGE"
-    assert res.json()["error"]["message"] == "영상은 500MB 이하만 업로드할 수 있어요."
+    assert res.json()["error"]["message"] == "영상은 2GB 이하만 업로드할 수 있어요."
 
 
 @pytest.mark.parametrize(
@@ -248,7 +248,7 @@ def test_n2_after_completion_returns_current_status(
 
 
 def test_n2_uploaded_file_too_large(client, uploaded, auth_headers, storage, queue):
-    aid = uploaded(size=MB500 + 1)
+    aid = uploaded(size=GB2 + 1)
     res = client.post(f"{API}/analyses/{aid}/start", headers=auth_headers)
     assert res.status_code == 413
     assert _err(res) == "FILE_TOO_LARGE"
